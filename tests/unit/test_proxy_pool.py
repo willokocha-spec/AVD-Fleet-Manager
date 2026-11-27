@@ -274,6 +274,30 @@ def test_import_text_partial_success_and_duplicates() -> None:
     assert SECRET not in "\n".join(again.errors)
 
 
+def test_import_text_allows_many_credentials_behind_one_gateway() -> None:
+    """Rotating providers export many credentials for a single ``host:port``.
+
+    Every credential is a distinct proxy, so the importer must not reject the
+    second and later entries as duplicate names (it used to import only one).
+    """
+    service, _store, vault = _service()
+    text = "\n".join(
+        f"http://session-{index:02d}-long-rotating-username:{SECRET}@gate.example.com:8080"
+        for index in range(3)
+    )
+    result = service.import_text(text, source="export")
+
+    assert result.added and len(result.added) == 3
+    assert result.errors == []
+    assert [config.name for config in result.added] == [
+        "gate.example.com:8080",
+        "gate.example.com:8080 #2",
+        "gate.example.com:8080 #3",
+    ]
+    assert len({config.id for config in result.added}) == 3
+    assert len(vault.data) == 3
+
+
 def test_list_and_views_respect_disabled_flag() -> None:
     service, _, _ = _service()
     enabled = service.add(url="http://u:p@one.example.com:8080", name="one")

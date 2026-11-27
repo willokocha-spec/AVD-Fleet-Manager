@@ -92,6 +92,7 @@ class AppiumManager:
         adb_exec_timeout: int = DEFAULT_ADB_EXEC_TIMEOUT_MS,
         no_reset: bool = False,
         detect_drivers: bool = True,
+        shutdown_on_close: bool = True,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -118,6 +119,7 @@ class AppiumManager:
         self._adb_exec_timeout = int(adb_exec_timeout)
         self._no_reset = bool(no_reset)
         self._detect_drivers = detect_drivers
+        self._shutdown_on_close = bool(shutdown_on_close)
         self._clock = clock
         self._sleep = sleep
         self._lock = threading.RLock()
@@ -152,6 +154,7 @@ class AppiumManager:
         running = False
         pid: int | None = None
         version = ""
+        drivers: list[str] = []
         sessions = 0
         message = ""
         if port:
@@ -161,6 +164,10 @@ class AppiumManager:
                 version = self._version or _version_from_status(value)
                 pid = self._process.pid if self._process is not None and self._process.poll() is None else (state or {}).get("pid")
                 sessions = self._count_sessions(int(port))
+                # Driver detection is a one-off at start(); a later CLI
+                # invocation has no in-memory list, so read the persisted one
+                # instead of reporting that no drivers are installed.
+                drivers = self._drivers or _drivers_from_state(state)
         if not running:
             if executable is None:
                 message = (
@@ -176,7 +183,7 @@ class AppiumManager:
             pid=int(pid) if running and pid is not None else None,
             port=int(port) if running and port is not None else None,
             version=version if running else "",
-            drivers=list(self._drivers) if running else [],
+            drivers=drivers if running else [],
             sessions=sessions,
             url=self._server_url(int(port)) if running and port else "",
             message=message,
@@ -309,7 +316,18 @@ class AppiumManager:
             )
 
     def close(self) -> None:
-        """Best-effort shutdown used by the service container."""
+        """Best-effort shutdown used by the service container.
+
+        A server can outlive the process that started it: ``avdfleet appium
+        start`` runs in a one-shot CLI process and records pid/port in
+        ``server.json`` so later invocations (and the daemon) can connect to it.
+        Containers therefore construct the manager with
+        ``shutdown_on_close=False`` and only an explicit :meth:`stop` ends that
+        shared server; otherwise every short-lived command (including
+        ``avdfleet appium status``) would kill the server it just inspected.
+        """
+        if not self._shutdown_on_close:
+            return
         try:
             self.stop()
         except Exception:  # noqa: BLE001 - shutdown must not raise
@@ -752,6 +770,14 @@ def _version_from_status(value: Mapping[str, Any]) -> str:
     if value.get("version"):
         return str(value["version"])
     return ""
+
+
+def _drivers_from_state(state: Mapping[str, Any] | None) -> list[str]:
+    """Return the driver list persisted by :meth:`AppiumManager.start`."""
+    raw = (state or {}).get("drivers")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, str) and item]
 
 
 def _pid_alive(pid: int) -> bool:

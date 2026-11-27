@@ -437,11 +437,26 @@ class ProxyPoolService:
         )
         return self._to_config(record)
 
+    def _import_name(self, base: str) -> str:
+        """Return a free display name for a bulk-imported proxy.
+
+        Rotating proxy providers hand out many credentials behind a single
+        gateway (``host:port``), so the plain ``host:port`` name collides for
+        every entry after the first and the rest were rejected as name conflicts.
+        Imported proxies therefore become ``host:port``, ``host:port #2``, ... .
+        """
+        candidate = base
+        index = 1
+        while self._repo.get_by_name(candidate) is not None:
+            index += 1
+            candidate = f"{base} #{index}"
+        return candidate
+
     def _persist_parsed(self, entry: ParsedProxy, *, source: str) -> ProxyConfig:
         config, password = self._build_config(
             {
                 "id": entry.id,
-                "name": entry.name,
+                "name": self._import_name(entry.name),
                 "scheme": entry.scheme.value,
                 "host": entry.host,
                 "port": entry.port,

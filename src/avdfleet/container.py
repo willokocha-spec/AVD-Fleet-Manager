@@ -30,7 +30,7 @@ logger = logging.getLogger("avdfleet.container")
 class Container:
     """Dependency-ordered service graph implementing core ServiceContainer."""
 
-    def __init__(self, config: Config, paths: Paths) -> None:
+    def __init__(self, config: Config, paths: Paths, *, detached_bridge: bool = False) -> None:
         self.config = config
         self.paths = paths
         ensure_process_adb_environment(port_end=config.port_range_end)
@@ -73,7 +73,7 @@ class Container:
 
         # -- proxy (needed by runtime for strict egress isolation) -------
         from .proxy import AssignmentService, ProxyPoolService, create_vault
-        from .proxy.bridge import BridgeManager
+        from .proxy.bridge import BridgeManager, DetachedBridgeManager
         from .proxy.verify import GuestEgressVerifier
 
         self.vault = create_vault(paths, backend=getattr(config, "vault_backend", "auto"))
@@ -95,7 +95,20 @@ class Container:
             appium_start=config.appium_port_start,
             bridge_start=config.bridge_port_start,
         )
-        self.bridge_service = BridgeManager(config, port_allocator=self.port_allocator)
+        # The bridge must outlive the process that starts an emulator: the
+        # emulator probes its proxy early in boot and silently falls back to
+        # direct host egress when nothing answers on the loopback URL.
+        #
+        # Two owners need two lifetimes.  A one-shot CLI invocation exits seconds
+        # after spawning the emulator, so it needs the detached per-instance
+        # worker (``detached_bridge=True``).  The daemon and the test suite are
+        # long-lived owners: an in-process bridge is correct for them, cheaper,
+        # and observable.
+        self.bridge_service = (
+            DetachedBridgeManager(config, paths)
+            if detached_bridge
+            else BridgeManager(config, port_allocator=self.port_allocator)
+        )
         self.verifier_service = GuestEgressVerifier(
             config,
             adb_path=[str(self.adb_path)] if self.adb_path else None,
@@ -124,7 +137,14 @@ class Container:
         # -- automation --------------------------------------------------
         from .appium import AppiumManager
         from .scripts import ScriptService
+        from .scripts.runners import DEFAULT_APPIUM_URL
 
+        # appium_python/appium_js scripts must reach the server this fleet
+        # actually runs.  Its port comes from the Appium port block, so the
+        # historical hard-coded 4723/wd/hub would silently target a different
+        # server whenever 4723 is taken.  AppiumManager.url reads the port back
+        # from server.json, so this also resolves in a fresh CLI process; the
+        # default is kept for a user-managed Appium server at 4723.
         self.script_service = ScriptService(
             store=self.store,
             event_bus=self.event_bus,
@@ -132,6 +152,7 @@ class Container:
             paths=paths,
             instance_resolver=self._instance_or_none,
             adb_command=[str(self.adb_path)] if self.adb_path else None,
+            appium_url_resolver=lambda target: self.appium_service.url or DEFAULT_APPIUM_URL,
         )
         self.appium_service = AppiumManager(
             config,
@@ -140,6 +161,12 @@ class Container:
             adb_command=[str(self.adb_path)] if self.adb_path else None,
             instance_resolver=self._instance_or_none,
             port_allocator=self.port_allocator,
+            # The Appium server is a cross-process service: 'avdfleet appium
+            # start' records pid/port in server.json and exits, so tearing the
+            # container down must never stop a server another command (or the
+            # daemon) is still using.  'avdfleet appium stop' is the only
+            # implicit-free shutdown path.
+            shutdown_on_close=False,
         )
 
         # -- installer / fleet / portable -------------------------------
@@ -422,11 +449,18 @@ def _persist_config_values(path: Path, values: dict[str, Any]) -> None:
 def build_container(
     config: Config | None = None,
     paths: Paths | None = None,
+    *,
+    detached_bridge: bool = False,
 ) -> Container:
-    """Build the production container (used by ``create_app`` and the CLI)."""
+    """Build the production container (used by ``create_app`` and the CLI).
+
+    ``detached_bridge`` selects a per-instance detached proxy-bridge worker.
+    One-shot CLI invocations pass ``True`` because the emulator outlives them;
+    the daemon keeps the in-process bridge (its default) for observation.
+    """
     resolved_config = config or Config.load()
     resolved_paths = paths or resolved_config.resolved_paths()
-    return Container(resolved_config, resolved_paths)
+    return Container(resolved_config, resolved_paths, detached_bridge=detached_bridge)
 
 
 __all__ = ["Container", "build_container"]

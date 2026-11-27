@@ -167,6 +167,55 @@ skipping ("the image ships no Setup Wizard"). The remaining skips are
 environmental: portable (installed edition), proxies (none configured),
 `scripts.appium` (Appium server not started) and `custom_image` (not supplied).
 
+### Second pass: proxies, Appium, root and API 25 (2026-11-27, later)
+
+**Appium - verified live.** `avdfleet appium start` plus `avdfleet scripts run`
+against a real API 34 AVD produced a real UiAutomator2 session
+(`0daabe6a-cb8d-40dc-9bd3-b1ab23f037c8`, created in 17.4 s, activity
+`com.google.android.apps.nexuslauncher/.NexusLauncherActivity`, screen 1080x2400).
+Three defects had to be fixed first: every one-shot CLI command killed the shared
+server on exit (`appium status` included); Appium scripts ignored the managed
+server's real port and always used `127.0.0.1:4723`; and the first-session
+UiAutomator2 APK install inherited Appium's 20 s timeout (observed `adbExec timed
+out after 20000ms`). Regression tests cover all three. Note the selftest's
+`scripts.appium` check only asserts that `APPIUM_URL`/`UDID` are non-empty - it
+never creates a session, so it is not proof of a working session; the session
+above is.
+
+**Proxies - G1 isolation measured against 12 real authenticated proxies.**
+All 12 worked host-side (one probe each, HTTP 200, 606-6269 ms, 12 distinct exit
+IPs). A guest booted with an assigned proxy was proven to egress through the
+per-instance bridge (`http_proxy=http://<instance>:<token>@127.0.0.1:7800`, zero
+`Proxy will be ignored`, proxy handshakes reaching the bridge), and the assigned
+proxy's exit IP (212.129.86.177) differed from the host's CGNAT address. The
+upstream password appeared **zero** times in logs, process argv (490 command
+lines), the REST `/proxies` view, CLI output, SQLite, the vault and bridge state.
+Two findings: the in-process bridge used to die when the `instances start` CLI
+exited, so the emulator gave up on its proxy and **silently egressed on the host
+network** - fixed with a detached per-instance bridge worker and 9 regression
+tests; and the emulator logs its own `http_proxy` value, so the per-instance
+*loopback* token appears in `Logs/<instance>-emulator.log` (the upstream
+credential never does) - documented, not scrubbed. Known gap: `instances stop` can
+leave an orphaned bridge worker, visible in `avdfleet proxies bridges`.
+
+**Rooted images - scripted and measured.** [rooted-images.md](rooted-images.md)
+and `scripts/emulator-root-probe.ps1`: `adb root` works on userdebug images;
+`-writable-system` + `adb root` + `adb remount` gives a writable `/system` (API 25
+immediately, API 34 after an overlayfs reboot); the changes live in the AVD's
+`system.img.qcow2`, so they vanish on a plain boot and on AVD deletion; SELinux
+can be made permissive per boot. Script self-test: API 25 PASS in 75 s, API 34
+PASS in 189 s.
+
+**OOBE on API 25.** [oobe-api25.md](oobe-api25.md) documents the gate
+(`ro.setupwizard.mode=EMULATOR`, injected by the emulator and unreachable from
+userspace), everything that does *not* cross it, and the three routes that can.
+The `farm` Magisk toolkit roots API 25 through a ramdisk patch, and
+`magisk resetprop ro.setupwizard.mode OPTIONAL` does change the property - but
+applying it after boot is too late for the wizard, so an OOBE-capable API 25
+needs the value set before SystemServer starts (a Magisk `post-fs-data.sh`) or a
+repacked image.
+
+
 ## GUI screenshots
 
 Twelve screenshots were captured with Playwright + Microsoft Edge against the
@@ -179,21 +228,33 @@ evidence):
 
 ## Still not verified
 
-1. Proxy isolation gate G1 on real proxies (no guest egress or credential
-   evidence) - [research/g1/gate.md](../research/g1/gate.md), two independent
-   runs still required.
-2. An Appium script against a real session (the server was not running).
-3. A custom-image boot (no custom image supplied).
-4. The portable edition on a fresh machine (bundle, launch, relocation,
+1. The formal G1 gate - two independent runs with a **guest-measured** egress IP
+   ([research/g1/gate.md](../research/g1/gate.md)). Ad-hoc evidence now exists:
+   12/12 host probes, the guest proven to route through its per-instance bridge,
+   zero upstream-credential leaks, and distinct exit IPs, but the API 34 image
+   has no HTTP client able to echo an IP from inside the guest, so the exit IP was
+   measured host-side through the identical bridge. Also required: a second run,
+   and a concurrent two-instance isolation run (only sequential was possible).
+2. A custom-image boot (no custom image supplied).
+3. The portable edition on a fresh machine (bundle, launch, relocation,
    filesystem diff) - [research/R7-portable.md](../research/R7-portable.md).
-5. Installer container matrix on Ubuntu/Debian/Fedora/Rocky/Arch and accelerated
+4. Installer container matrix on Ubuntu/Debian/Fedora/Rocky/Arch and accelerated
    runs on macOS HVF / Linux KVM.
-6. Five-instance parallel fan-out and the full `--e2e` sequence without
+5. Five-instance parallel fan-out and the full `--e2e` sequence without
    `--fast --count 1`.
-7. Repeatable API 25 OOBE: the wizard appeared once, on the first boot of the
-   installed image; every later run (17:06Z, 17:16Z, 17:21Z and 17:27Z, the
-   last with `wipe_data=True` plus `-no-snapshot`) did not restore it.
-   Reset-to-OOBE timings are also unrecorded.
+6. Repeatable API 25 OOBE as a **product feature**. It has been proven possible
+   by hand - see [oobe-api25.md](oobe-api25.md): root the image (rootAVD +
+   Magisk), complete Magisk's "Additional Setup" (without it no module runs),
+   install a `post-fs-data.sh` module that does
+   `magisk resetprop ro.setupwizard.mode OPTIONAL`, clear the provisioning flags
+   and cold boot with snapshots disabled. Two consecutive cold boots landed in
+   the real wizard, with screenshots. What is *not* done: wiring that into
+   `avdfleet` as a supported, opt-in path (it mutates the shared SDK ramdisk
+   unless the image is copied, and it deliberately bypasses a boot-security
+   control). Userspace reset strategies still cannot cross the gate, which is why
+   `reset-oobe` correctly reports `ok: false` on that image (wipe 64 s,
+   package 8.7 s).
+
 
 No result on this page should be upgraded to "real emulator" without a cited
 record like the ones in the live page.

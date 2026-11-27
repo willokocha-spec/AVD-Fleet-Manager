@@ -378,7 +378,13 @@ class CliContext:
                 hint="reinstall avdfleet (the 'avdfleet.container' module is missing)",
             ) from exc
         try:
-            container = invoke_callable(build_container, self.config, self.paths)
+            # A one-shot CLI invocation exits seconds after spawning an emulator,
+            # so the per-instance proxy bridge must live in a detached worker; an
+            # in-process bridge would die here, the emulator would give up on its
+            # proxy and the guest would silently egress directly (G1 failure).
+            container = invoke_callable(
+                build_container, self.config, self.paths, detached_bridge=True
+            )
         except AvdFleetError:
             raise
         except Exception as exc:  # noqa: BLE001 - startup failures are environment errors

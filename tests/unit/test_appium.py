@@ -297,6 +297,38 @@ def test_close_stops_a_running_server(appium_env: SimpleNamespace) -> None:
     assert _wait_until(lambda: is_port_free(status.port), timeout=10.0)
 
 
+def test_close_keeps_a_shared_server_running_when_shutdown_is_disabled(
+    appium_env: SimpleNamespace,
+) -> None:
+    """A server started for later processes must survive container teardown.
+
+    ``avdfleet appium start`` is a one-shot CLI command: it records pid/port in
+    ``server.json`` and exits, and later commands (``appium status``,
+    ``scripts run``) connect to that server.  Tearing the owning container down
+    must therefore leave it running; only an explicit ``stop()`` ends it.
+    """
+    manager = appium_env.make_manager(shutdown_on_close=False)
+    status = manager.start()
+    assert status.running
+    try:
+        manager.close()
+        assert manager.status().running is True
+        assert status.pid is not None and psutil.pid_exists(status.pid)
+
+        # A separate process (a later CLI invocation) sees the same server,
+        # including the driver list persisted at start time.
+        observer = appium_env.make_manager(shutdown_on_close=False)
+        observed = observer.status()
+        assert observed.running is True
+        assert observed.port == status.port
+        assert observed.drivers == ["uiautomator2@3.0.0"]
+        observer.close()
+        assert manager.status().running is True
+    finally:
+        manager.stop()
+    assert manager.status().running is False
+
+
 def test_manager_implements_core_appium_protocol(appium_env: SimpleNamespace) -> None:
     from avdfleet.core.interfaces import AppiumManager as AppiumManagerProtocol
 
@@ -336,6 +368,22 @@ def test_build_capabilities_derives_udid_from_console_port(appium_env: SimpleNam
     avd.adb_serial = None
     capabilities = manager.build_capabilities(avd)
     assert capabilities["appium:udid"] == "emulator-5554"
+
+
+def test_build_capabilities_allows_a_slow_first_server_install(
+    appium_env: SimpleNamespace,
+) -> None:
+    """The first session installs the UiAutomator2 server APK on the device.
+
+    Appium's 20 s install default aborts that on a cold or loaded emulator (a
+    live session failed with "adbExec timed out" on a host running several
+    emulators), so the generated capabilities allow more time while the
+    per-command adb timeout stays unchanged.
+    """
+    manager = appium_env.make_manager()
+    capabilities = manager.build_capabilities(_running_avd())
+    assert capabilities["appium:uiautomator2ServerInstallTimeout"] == 120_000
+    assert capabilities["appium:adbExecTimeout"] == 20_000
 
 
 def test_build_capabilities_rejects_non_running_instance(appium_env: SimpleNamespace) -> None:

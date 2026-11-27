@@ -1007,6 +1007,18 @@ class SelftestRunner:
                 f"verification needs a real emulator/guest ({error})",
                 payload,
             )
+        if "no usable HTTP client" in error:
+            # Modern emulator images ship no curl/wget, so the guest cannot echo
+            # its egress IP.  That is a property of the image, not a failed
+            # verification: report it as a skip with the reason instead of failing
+            # the acceptance run (the bridge path itself is still exercised).
+            return (
+                "skip",
+                "the guest image has no usable HTTP client, so the egress IP cannot be"
+                f" measured from inside the guest ({error}); verify the bridge path"
+                " manually with 'avdfleet proxies verify'",
+                payload,
+            )
         return ("fail", f"guest egress verification failed: {error}", payload)
 
     # -- scripts ---------------------------------------------------------

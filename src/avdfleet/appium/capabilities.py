@@ -20,6 +20,7 @@ from .ports import AppiumPorts
 __all__ = [
     "DEFAULT_ADB_EXEC_TIMEOUT_MS",
     "DEFAULT_NEW_COMMAND_TIMEOUT_S",
+    "DEFAULT_SERVER_INSTALL_TIMEOUT_MS",
     "build_capabilities",
     "build_uiautomator2_capabilities",
     "serial_for",
@@ -27,6 +28,13 @@ __all__ = [
 
 DEFAULT_NEW_COMMAND_TIMEOUT_S = 120
 DEFAULT_ADB_EXEC_TIMEOUT_MS = 20_000
+#: The UiAutomator2 server APK is installed on the device during the first
+#: session.  Appium's own default is 20 s, which aborts the session on a cold or
+#: loaded emulator (observed live: an install on a host running several
+#: emulators exceeded 20 s and the session failed with "adbExec timed out");
+#: two minutes keeps the first session reliable without affecting normal
+#: command latency, which stays bounded by ``adbExecTimeout``.
+DEFAULT_SERVER_INSTALL_TIMEOUT_MS = 120_000
 
 
 def serial_for(avd: AvdInfo) -> str:
@@ -50,6 +58,7 @@ def build_uiautomator2_capabilities(
     no_reset: bool = False,
     new_command_timeout: int = DEFAULT_NEW_COMMAND_TIMEOUT_S,
     adb_exec_timeout: int = DEFAULT_ADB_EXEC_TIMEOUT_MS,
+    server_install_timeout: int = DEFAULT_SERVER_INSTALL_TIMEOUT_MS,
     auto_grant_permissions: bool = True,
     chromedriver_executable: str | None = None,
     extra: Mapping[str, Any] | None = None,
@@ -106,6 +115,7 @@ def build_uiautomator2_capabilities(
         "appium:autoGrantPermissions": bool(auto_grant_permissions),
         "appium:newCommandTimeout": int(new_command_timeout),
         "appium:adbExecTimeout": int(adb_exec_timeout),
+        "appium:uiautomator2ServerInstallTimeout": int(server_install_timeout),
         "appium:suppressKillServer": True,
     }
     if chromedriver_executable:

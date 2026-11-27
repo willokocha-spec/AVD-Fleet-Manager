@@ -15,7 +15,7 @@ from avdfleet.api.app import create_app
 from avdfleet.container import build_container
 from avdfleet.core.config import Config
 from avdfleet.core.errors import NotFoundError
-from avdfleet.core.models import Template
+from avdfleet.core.models import ScriptDefinition, ScriptRunRequest, ScriptType, Template
 from avdfleet.core.paths import Paths
 
 
@@ -65,6 +65,66 @@ def test_container_builds_all_services(container_env) -> None:
     assert c.fleet() is not None
     assert c.oobe().matrix().records
     assert c.repository().health()["ok"] is True
+
+
+def test_container_teardown_keeps_the_shared_appium_server(container_env) -> None:
+    """The production container must not stop the fleet-wide Appium server.
+
+    ``avdfleet appium start`` boots the server in a one-shot CLI process and
+    exits, so ``Container.close()`` (called from the CLI's exit hook) used to
+    kill the server it had just started - every later ``scripts run`` then had
+    no Appium to talk to.  Only ``avdfleet appium stop`` ends it.
+    """
+    appium = container_env.appium()
+    started = appium.start()
+    assert started.running is True
+    try:
+        container_env.close()  # exactly what the CLI does when the command exits
+        assert appium.status().running is True
+    finally:
+        appium.stop()
+    assert appium.status().running is False
+
+
+def test_appium_scripts_target_the_managed_server(container_env) -> None:
+    """appium_python scripts receive the URL of the server this fleet runs.
+
+    The managed port comes from the Appium port block (the fake config starts
+    at 5300), so the historical hard-coded ``4723/wd/hub`` would point every
+    script at a different server whenever 4723 is unavailable.
+    """
+    appium = container_env.appium()
+    started = appium.start()
+    try:
+        assert started.running is True
+        assert started.url
+        assert started.port != 4723
+        definition = ScriptDefinition(
+            id="appium-url-probe",
+            name="Appium URL probe",
+            type=ScriptType.APPIUM_PYTHON,
+            content=(
+                "import os\n"
+                f"expected = {started.url!r}\n"
+                "url = os.environ.get('APPIUM_URL', '')\n"
+                "print('APPIUM_URL=%s' % url)\n"
+                "raise SystemExit(0 if url == expected else 1)\n"
+            ),
+        )
+        scripts = container_env.scripts()
+        scripts.save_script(definition)
+        run = scripts.run(
+            ScriptRunRequest(
+                script_id=definition.id,
+                instances=["avd-01"],
+                concurrency=1,
+                timeout_s=60,
+            )
+        )
+        assert run.failed == 0
+        assert run.succeeded == 1
+    finally:
+        appium.stop()
 
 
 def test_container_api_smoke(container_env) -> None:

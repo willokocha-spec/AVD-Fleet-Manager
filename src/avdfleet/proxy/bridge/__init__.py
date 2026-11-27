@@ -21,6 +21,7 @@ one-request-per-connection forwarding) are documented in
 
 from __future__ import annotations
 
+from .detached import DetachedBridgeManager
 from .http_proxy import HttpProxyServer
 from .manager import (
     DEFAULT_BRIDGE_PORT_START,
@@ -52,6 +53,7 @@ __all__ = [
     "BridgeManager",
     "BridgeOptions",
     "Credentials",
+    "DetachedBridgeManager",
     "DirectUpstream",
     "HttpProxyServer",
     "HttpUpstream",
