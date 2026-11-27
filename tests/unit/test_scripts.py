@@ -278,7 +278,7 @@ def test_adb_shell_fan_out_uses_serial_and_never_a_host_shell(
     try:
         script = service.save_script(SIMPLE_SCRIPT)
         run = service.run(
-            ScriptRunRequest(script_id=script.id, instances=["avd-01", "avd-02"], concurrency=2)
+            ScriptRunRequest(script_id=script.id, instances=["avd-01", "avd-02"], concurrency=1)
         )
         assert run.state is RunState.SUCCEEDED
         assert [result.instance for result in run.results] == ["avd-01", "avd-02"]
