@@ -37,6 +37,7 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 | 15 | GUI acquisition UI + Xposed step actions/inventory | done | Toolchain panel in two tabs; profile editor offers `complete_magisk_setup`, `enable_xposed_module`, `set_xposed_scope`; module table renders `scope` |
 | 16 | Rebuild the shipped GUI bundle into `src/avdfleet/api/static/` | done | `index-C3UtynXb.js` (581.94 kB) + `index-CKQTONAt.css`; old `index-Cj2XS7za.js` removed; `index.html` references match |
 | 17 | **Unattended Magisk setup** (`complete_magisk_setup`) | done | installs the acquired APK, drives the dialog via `uiautomator dump` + `input tap`, waits for the self-reboot, verifies `/data/adb/magisk`; added to the three Magisk profiles |
+| 21 | Lifecycle automation (instance -> profile on start) | done | settings-backed mapping, queued on `instances start` / `wait-boot`, persists across restarts; live smoke test passed |
 | 19 | Root/writable-system/manager/reboot/remove steps | done | `enable_adb_root`, `enable_writable_system`, `install_lsposed_manager`, `reboot`, `remove_lsposed`, `remove_magisk` (refuses, with guidance) |
 | 20 | WebSocket events for deployments | done | `EventType.INSTRUMENTATION_RUN` with `started`/`finished`; publish failures never break a run |
 | 18 | Built-in profiles refresh in place | done | an upgrade that adds a step now updates existing installs (built-ins are read-only, so this cannot clobber user edits) |

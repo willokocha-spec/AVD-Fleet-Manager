@@ -2198,6 +2198,91 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/instrumentation/instances/{name}/auto-profile:
+    get:
+      tags:
+      - instrumentation
+      summary: Profile applied automatically when the AVD boots
+      operationId: getInstrumentationAutoProfile
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                title: Response Getinstrumentationautoprofile
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: Unauthorized
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: Service Unavailable
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - instrumentation
+      summary: Bind or clear the profile applied when the AVD boots
+      operationId: setInstrumentationAutoProfile
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutoProfileRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                title: Response Setinstrumentationautoprofile
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: Unauthorized
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+          description: Service Unavailable
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   securitySchemes:
     bearerAuth:
@@ -3551,3 +3636,11 @@ components:
           default: false
       type: object
       title: AcquireRequest
+    AutoProfileRequest:
+      properties:
+        profile_id:
+          type: string
+          title: Profile Id
+          default: ''
+      type: object
+      title: AutoProfileRequest

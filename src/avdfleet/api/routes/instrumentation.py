@@ -92,6 +92,10 @@ class AcquireRequest(BaseModel):
     confirm: bool = False
 
 
+class AutoProfileRequest(BaseModel):
+    profile_id: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Capability scanning
 # ---------------------------------------------------------------------------
@@ -283,6 +287,26 @@ def clone_profile(
 ) -> Any:
     name = payload.name if payload is not None else ""
     return _service(container).clone_profile(profile_id, name=name)
+
+
+@router.get(
+    "/instrumentation/instances/{name}/auto-profile",
+    operation_id="getInstrumentationAutoProfile",
+    summary="Profile applied automatically when the AVD boots",
+)
+def get_auto_profile(container: ContainerDep, name: str) -> Any:
+    return _service(container).get_auto_profile(name)
+
+
+@router.put(
+    "/instrumentation/instances/{name}/auto-profile",
+    operation_id="setInstrumentationAutoProfile",
+    summary="Bind or clear the profile applied when the AVD boots",
+)
+def set_auto_profile(
+    container: ContainerDep, name: str, payload: AutoProfileRequest
+) -> Any:
+    return _service(container).set_auto_profile(name, payload.profile_id or None)
 
 
 # ---------------------------------------------------------------------------

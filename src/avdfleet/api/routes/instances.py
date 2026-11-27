@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Query, Response
@@ -122,6 +123,32 @@ class CapacityInfoView(BaseModel):
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
+
+def _launch_auto_profile(container: ContainerAdapter, name: str) -> None:
+    """Start the AVD's configured instrumentation profile in the background.
+
+    Best-effort by design: a broken profile must never fail an instance start, so
+    every failure here is logged and swallowed.
+    """
+    service = container.raw_service("instrumentation")
+    if service is None:
+        return
+    try:
+        run = service.try_auto_profile(name)
+    except Exception:  # noqa: BLE001 - automation must not break the start route
+        logger.exception("auto instrumentation profile for %s could not be queued", name)
+        return
+    if run is None:
+        return
+
+    def execute() -> None:
+        try:
+            service.execute_run(run.id)
+        except Exception:  # noqa: BLE001 - background run failures are logged
+            logger.exception("auto instrumentation run %s crashed", run.id)
+
+    threading.Thread(target=execute, name=f"avdfleet-auto-{run.id}", daemon=True).start()
+
 
 router = APIRouter(
     prefix=API_PREFIX,
@@ -391,12 +418,14 @@ def start_instance(
     payload: Annotated[InstanceStartRequest | None, Body()] = None,
 ) -> AvdInfo:
     body = payload or InstanceStartRequest()
-    return container.runtime().start(
+    info = container.runtime().start(
         name,
         proxy_id=body.proxy_id,
         headless=body.headless,
         dry_run=body.dry_run,
     )
+    _launch_auto_profile(container, name)
+    return info
 
 
 @router.post(
@@ -437,7 +466,9 @@ def wait_boot(
     payload: Annotated[WaitBootRequest | None, Body()] = None,
 ) -> AvdInfo:
     body = payload or WaitBootRequest()
-    return container.runtime().wait_boot(name, timeout_s=body.timeout_s)
+    info = container.runtime().wait_boot(name, timeout_s=body.timeout_s)
+    _launch_auto_profile(container, name)
+    return info
 
 
 @router.post(

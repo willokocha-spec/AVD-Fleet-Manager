@@ -81,6 +81,31 @@ returns; the older notice claiming scope was not reported has been removed. The
 profile editor exposes every step action, including the Xposed database steps, the
 root/writable-system actions and `reboot`.
 
+### Lifecycle automation
+
+An AVD can be bound to a profile that runs automatically when it starts:
+
+```bash
+curl -X PUT "$API/instrumentation/instances/Device_4/auto-profile" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"profile_id": "prof_builtin_root"}'
+```
+
+`GET` the same path returns the binding; an empty `profile_id` clears it. The
+binding is stored in the `settings` table (`instrumentation.auto_profiles`) and
+survives daemon restarts. Both `POST /instances/{name}/start` and
+`POST /instances/{name}/wait-boot` queue the configured profile on a worker
+thread after the call succeeds, so a slow deployment never delays the start
+response. Automation is best-effort by design: a missing profile, a stopped AVD
+or a failing step is logged and never fails the instance start.
+
+To verify components after a reboot rather than install anything, bind a
+verify-only profile (for example `Root`, or a custom profile whose single step is
+`verify` with `expect`). Note that this does not detect a *snapshot restore*
+having reverted the data partition — a restore that removes `/data/adb` shows up
+as `magisk_environment_ready: false` on the next scan, which is the signal to
+redeploy.
+
 ### REST API
 
 All routes are under `/api/v1`, require the daemon bearer token, and return JSON

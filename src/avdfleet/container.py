@@ -408,6 +408,7 @@ class Container:
                 magisk_installer=_magisk_installer_from_environment(self),
                 acquisition=self.instrumentation_acquisition,
                 events=self.event_bus,
+                settings=self.store.settings,
             )
         return self._instrumentation_service
 

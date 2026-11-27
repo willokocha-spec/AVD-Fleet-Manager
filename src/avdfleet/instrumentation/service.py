@@ -90,7 +90,9 @@ class InstrumentationService:
         max_concurrency: int = DEFAULT_CONCURRENCY,
         acquisition: AcquisitionStore | None = None,
         events: Any | None = None,
+        settings: Any | None = None,
     ) -> None:
+        self._settings = settings
         self._events = events
         self._acquisition = acquisition
         self._repo = repository
@@ -129,6 +131,63 @@ class InstrumentationService:
         self._repo.delete_module(module_id)
         if delete_file:
             self._library.delete_file(record)
+
+    # -- lifecycle automation ---------------------------------------------
+    #: Settings key holding ``{instance: profile_id}`` for start-time automation.
+    AUTO_PROFILE_KEY = "instrumentation.auto_profiles"
+
+    def _auto_map(self) -> dict[str, str]:
+        if self._settings is None:
+            return {}
+        raw = self._settings.get(self.AUTO_PROFILE_KEY, {})
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(instance): str(profile)
+            for instance, profile in raw.items()
+            if str(instance).strip() and str(profile).strip()
+        }
+
+    def get_auto_profile(self, instance: str) -> dict[str, Any]:
+        """Return the profile configured to run when *instance* boots."""
+        return {"instance": instance, "profile_id": self._auto_map().get(instance, "")}
+
+    def set_auto_profile(self, instance: str, profile_id: str | None) -> dict[str, Any]:
+        """Bind (or clear) the profile applied automatically when *instance* boots."""
+        if self._settings is None:
+            raise ConfigError("lifecycle automation is not configured")
+        name = str(instance or "").strip()
+        if not name:
+            raise ValidationError("an instance name is required")
+        mapping = self._auto_map()
+        if profile_id:
+            profile = self.get_profile(profile_id)
+            mapping[name] = profile.id
+        else:
+            mapping.pop(name, None)
+        self._settings.set(self.AUTO_PROFILE_KEY, mapping)
+        return self.get_auto_profile(name)
+
+    def try_auto_profile(self, instance: str) -> DeploymentRun | None:
+        """Queue the configured profile for *instance*, or return None.
+
+        The caller executes the returned run (the API does it on a worker thread) so
+        a slow deployment never delays the start response.
+        """
+        profile_id = self._auto_map().get(instance)
+        if not profile_id:
+            return None
+        try:
+            run = self.start_run(
+                profile_id=profile_id,
+                targets=[instance],
+                label=f"auto on start: {instance}",
+            )
+        except AvdFleetError as exc:
+            logger.warning("auto profile for %s could not start: %s", instance, exc.message)
+            return None
+        self._log(run.id, instance, "queued automatically when the instance started")
+        return run
 
     # -- toolchain acquisition --------------------------------------------
     def toolchain_status(self) -> dict[str, Any]:

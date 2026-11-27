@@ -780,7 +780,7 @@ def test_openapi_paths_and_operation_ids_match_contract(client: TestClient) -> N
     )
     mismatched = {key: (actual[key], expected[key]) for key in expected if actual[key] != expected[key]}
     assert not mismatched, f"operationId mismatches: {mismatched}"
-    assert len(actual) == 89
+    assert len(actual) == 91
 
 
 def test_docs_disabled_by_environment(monkeypatch: pytest.MonkeyPatch, config: Config, paths: Paths, container: StubContainer) -> None:
