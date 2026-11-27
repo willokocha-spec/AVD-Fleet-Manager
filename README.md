@@ -4,6 +4,8 @@
 
 Repository: <https://github.com/willokocha-spec/AVD-Fleet-Manager>
 
+[![CI](https://github.com/willokocha-spec/AVD-Fleet-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/willokocha-spec/AVD-Fleet-Manager/actions/workflows/ci.yml)
+
 AVD Fleet (`avdfleet`) turns a powerful workstation into a repeatable Android device lab:
 
 - one-command installer for the Android SDK, emulator, JDK, Node, Appium 4 and scrcpy
