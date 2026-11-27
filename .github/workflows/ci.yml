@@ -69,7 +69,7 @@ jobs:
   # React GUI: typecheck, lint, unit tests (Vitest + MSW), production build.
   # ---------------------------------------------------------------------------
   ui:
-    name: UI (Node ${{ env.NODE_VERSION }})
+    name: UI (Node 22)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
