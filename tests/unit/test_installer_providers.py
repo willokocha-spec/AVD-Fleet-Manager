@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -127,6 +129,17 @@ def make_arch(tmp_path: Path, **overrides: object) -> ArchInstallProvider:
 
 def argv_text(commands: Sequence[Command]) -> str:
     return "\n".join(" ".join(command.argv) for command in commands)
+
+
+def _fake_tool_file(directory: Path, name: str) -> Path:
+    """Create an executable ``name`` (``.exe`` on Windows) in *directory*."""
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = ".exe" if os.name == "nt" else ""
+    path = directory / f"{name}{suffix}"
+    path.write_text("", encoding="utf-8")
+    with contextlib.suppress(OSError):
+        os.chmod(path, 0o755)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +275,64 @@ def test_which_and_command_exists(tmp_path: Path) -> None:
     assert provider.which("git") == "/usr/bin/git"
     assert provider.command_exists("curl") is True
     assert provider.command_exists("wget") is False
+
+
+def test_windows_provider_refresh_path_finds_winget_shims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = {**base_env(tmp_path), "PATH": str(tmp_path / "empty-bin")}
+    provider = make_windows(tmp_path, env=env, which=None)
+    monkeypatch.setattr(provider, "get_env_var", lambda *args, **kwargs: "")
+    shim_dir = tmp_path / "localappdata" / "Microsoft" / "WinGet" / "Links"
+    _fake_tool_file(shim_dir, "scrcpy")
+
+    # The provider's PATH snapshot predates the install: shims are invisible.
+    assert provider.which("scrcpy") is None
+
+    refreshed = provider.refresh_path()
+    assert str(shim_dir) in refreshed.split(os.pathsep)
+    found = provider.which("scrcpy")
+    assert found is not None
+    assert Path(found).parent == shim_dir
+
+
+def test_windows_provider_refresh_path_honours_injected_which(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real container injects ``which=shutil.which``; the refreshed PATH
+    # must still be consulted before declaring the tool missing.
+    env = {**base_env(tmp_path), "PATH": str(tmp_path / "empty-bin")}
+    provider = make_windows(tmp_path, env=env, which=lambda binary: None)
+    monkeypatch.setattr(provider, "get_env_var", lambda *args, **kwargs: "")
+    shim_dir = tmp_path / "localappdata" / "Microsoft" / "WinGet" / "Links"
+    _fake_tool_file(shim_dir, "scrcpy")
+
+    assert provider.which("scrcpy") is None
+    provider.refresh_path()
+    found = provider.which("scrcpy")
+    assert found is not None
+    assert Path(found).parent == shim_dir
+
+
+def test_windows_provider_refresh_path_merges_persisted_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    persisted_dir = tmp_path / "persisted-bin"
+    _fake_tool_file(persisted_dir, "scrcpy")
+    env = {**base_env(tmp_path), "PATH": str(tmp_path / "empty-bin")}
+    provider = make_windows(tmp_path, env=env, which=lambda binary: None)
+    monkeypatch.setattr(
+        provider,
+        "get_env_var",
+        lambda name, scope=None: str(persisted_dir) if name == "PATH" else None,
+    )
+
+    assert provider.which("scrcpy") is None
+    refreshed = provider.refresh_path()
+    assert str(persisted_dir) in refreshed.split(os.pathsep)
+    found = provider.which("scrcpy")
+    assert found is not None
+    assert Path(found).parent == persisted_dir
 
 
 # ---------------------------------------------------------------------------

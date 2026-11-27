@@ -228,7 +228,12 @@ class OobeManager:
                 info = self._provision(image, avd_name)
                 provisioned = True
                 boot_started = self._clock()
-                self._start(avd_name)
+                # The temporary AVD name is deterministic per image, so a repeat
+                # verification would otherwise boot the *already provisioned*
+                # userdata from the previous run and report the launcher instead
+                # of the wizard.  Wipe on every verification: OOBE only exists on
+                # a pristine data partition.
+                self._start(avd_name, wipe_data=True)
                 self._wait_boot(avd_name, timeout)
                 boot_seconds = round(max(0.0, self._clock() - boot_started), 6)
                 live_info = self._safe_instance(avd_name) or info
@@ -482,6 +487,17 @@ class OobeManager:
                     f"setup wizard visible ({detection.activity}) but screenshot evidence"
                     " could not be captured"
                 )
+        elif detection.kind.value == "provisioning":
+            # Stock emulator images ship no Setup Wizard, so a wiped AVD parks on
+            # FallbackHome until the framework self-provisions.  That is the real
+            # first-boot state for those images - report it honestly instead of
+            # calling it a failure or claiming a wizard that does not exist.
+            status = OobeStatus.UNSUPPORTED
+            notes = (
+                f"unprovisioned first-boot state ({detection.activity}); this image ships no"
+                " Setup Wizard, so there is no visual OOBE to verify and no package to reset -"
+                " use the 'wipe' or 'snapshot' reset strategy"
+            )
         elif detection.kind.value == "launcher":
             notes = (
                 f"launcher visible ({detection.activity or 'unknown'});"
@@ -650,14 +666,14 @@ class OobeManager:
             )
         return str(serial)
 
-    def _start(self, avd_name: str) -> None:
+    def _start(self, avd_name: str, *, wipe_data: bool = False) -> None:
         starter = getattr(self._runtime, "start", None)
         if not callable(starter):
             raise OobeError(
                 "the runtime cannot start instances",
                 hint="RuntimeManager.start(name) is required to verify OOBE images",
             )
-        invoke_adaptive(starter, avd_name)
+        invoke_adaptive(starter, avd_name, wipe_data=wipe_data)
 
     def _stop(self, avd_name: str) -> None:
         stopper = getattr(self._runtime, "stop", None)

@@ -50,6 +50,41 @@ INSTANCE_PREFIX = "selftest"
 TEMPLATE_ID = "selftest-template"
 SCRIPT_ID_PREFIX = "selftest-"
 
+
+def _is_selftest_avd_artifact(path: Path) -> bool:
+    """True for ``selftest-*.avd`` directories and ``selftest-*.ini`` files.
+
+    Only the self-test's own namespace is ever matched: a name has to start with
+    ``selftest-`` *and* have one of the two AVD artifact suffixes.  In
+    particular ``Device.avd`` and look-alikes such as ``selftestish.avd`` are
+    never touched.
+    """
+    name = path.name
+    if not name.startswith(f"{INSTANCE_PREFIX}-"):
+        return False
+    if name.endswith(".avd"):
+        return path.is_dir()
+    if name.endswith(".ini"):
+        return path.is_file()
+    return False
+
+
+def _artifact_instance_name(path: Path) -> str:
+    """Return the AVD name encoded in an artifact file name."""
+    return path.stem
+
+
+#: Boot wait cap used by ``--fast``.
+#:
+#: ``--fast`` may skip image downloads and trim host/doctor probes, but it must
+#: not shorten the *boot* wait below a realistic cold boot.  Measured cold boots
+#: on accelerated hardware are 120-180 s (147 s for an API-34 google_apis AVD and
+#: 128 s for the Play Store image on a WHPX host), so the previous 60 s cap made
+#: ``avdfleet selftest --e2e --fast`` fail by construction - the emulator was
+#: still booting when the wait expired.  This floor still bounds the run while
+#: leaving headroom for slow first boots.
+FAST_BOOT_TIMEOUT_S = 240.0
+
 _EMULATOR_ITEM_IDS = (
     "image",
     "template",
@@ -550,21 +585,113 @@ class SelftestRunner:
             return ("skip", "skipped: no instance booted successfully", {"blocked": True})
         return None
 
-    def _cleanup_previous_selftest_instances(self) -> None:
-        avds = optional_service(self.context, "avds")
-        if avds is None or not callable(getattr(avds, "list_instances", None)):
+    def _selftest_artifact_paths(self, problems: list[str]) -> list[Path]:
+        """Return orphaned ``selftest-*`` AVD directories/``.ini`` files on disk.
+
+        ``avd list`` only reports AVDs the SDK backend knows about, so an
+        interrupted self-test can leave a ``selftest-01.avd`` directory (and its
+        ``selftest-01.ini`` pointer) behind while the AVD itself is invisible to
+        the AVD service.  Those leftovers make the next deploy fail with
+        "already exists", so the self-test removes them directly.
+        """
+        try:
+            home = getattr(self.context.paths, "avd_home", None)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not crash the self-test
+            problems.append(f"could not resolve the AVD home: {exc}")
+            return []
+        if home is None:
+            return []
+        home_path = Path(home)
+        try:
+            if not home_path.is_dir():
+                return []
+            entries = sorted(home_path.iterdir(), key=lambda entry: entry.name)
+        except OSError as exc:
+            problems.append(f"could not scan the AVD home {home_path}: {exc}")
+            return []
+        return [entry for entry in entries if _is_selftest_avd_artifact(entry)]
+
+    def _stop_selftest_emulators(
+        self, runtime: Any | None, names: list[str], problems: list[str]
+    ) -> None:
+        """Stop running emulators for *names* through the runtime service.
+
+        Only processes the runtime itself reports as running are stopped; the
+        cleanup never guesses PIDs or removes files under an emulator it cannot
+        account for.
+        """
+        if runtime is None or not names:
             return
-        runtime = optional_service(self.context, "runtime")
-        for info in invoke_callable(avds.list_instances) or []:
-            name = str(getattr(info, "name", ""))
-            if not name.startswith(f"{INSTANCE_PREFIX}-"):
+        lister = getattr(runtime, "list_running", None)
+        stopper = getattr(runtime, "stop", None)
+        if not callable(lister) or not callable(stopper):
+            return
+        try:
+            running = {
+                str(getattr(info, "name", "")) for info in invoke_callable(lister) or []
+            }
+        except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+            problems.append(f"could not list running emulators: {exc}")
+            return
+        for name in names:
+            if name not in running:
                 continue
+            try:
+                invoke_callable(stopper, name, force=True)
+            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                problems.append(f"could not stop {name}: {exc}")
+
+    def _remove_selftest_artifact(self, path: Path) -> None:
+        """Remove one artifact without ever following a symlink to its target."""
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+
+    def _cleanup_previous_selftest_instances(self) -> None:
+        """Remove tracked and on-disk leftovers from a previous self-test run.
+
+        Tracked ``selftest-*`` instances are stopped and deleted through the AVD
+        service.  A second pass scans the resolved AVD home for
+        ``selftest-*.avd`` directories and ``selftest-*.ini`` files the service
+        cannot see (orphans) and removes them after stopping a still-running
+        emulator.  Every failure is collected into ``notes`` so ``selftest
+        --json`` reports it instead of leaving a mysterious deploy error behind.
+        """
+        problems: list[str] = []
+        avds = optional_service(self.context, "avds")
+        runtime = optional_service(self.context, "runtime")
+        tracked: list[tuple[str, Any]] = []
+        lister = getattr(avds, "list_instances", None) if avds is not None else None
+        if callable(lister):
+            try:
+                for info in invoke_callable(lister) or []:
+                    name = str(getattr(info, "name", ""))
+                    if name.startswith(f"{INSTANCE_PREFIX}-"):
+                        tracked.append((name, info))
+            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                problems.append(f"could not list existing instances: {exc}")
+        for name, info in tracked:
             try:
                 if runtime is not None and bool(getattr(getattr(info, "state", None), "active", False)):
                     invoke_callable(runtime.stop, name, force=True)
-                invoke_callable(avds.delete_instance, name)
-            except Exception:  # noqa: BLE001 - stale instance cleanup is best effort
+                if avds is not None and callable(getattr(avds, "delete_instance", None)):
+                    invoke_callable(avds.delete_instance, name)
+            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                problems.append(f"{name}: {exc}")
+        artifacts = self._selftest_artifact_paths(problems)
+        tracked_names = {name for name, _ in tracked}
+        orphan_names = sorted({_artifact_instance_name(path) for path in artifacts} - tracked_names)
+        self._stop_selftest_emulators(runtime, orphan_names, problems)
+        for path in artifacts:
+            try:
+                self._remove_selftest_artifact(path)
+            except FileNotFoundError:
                 continue
+            except OSError as exc:
+                problems.append(f"{path.name}: {exc}")
+        if problems:
+            self.notes.append("cleanup problems: " + "; ".join(problems))
 
     def _instances_action(self) -> tuple[str, str, dict[str, Any]]:
         template_id = self.state.get("template_id")
@@ -615,7 +742,7 @@ class SelftestRunner:
 
     def _boot_timeout(self) -> float:
         configured = float(getattr(self.context.config, "boot_timeout_s", 300))
-        return min(configured, 60.0) if self.fast else configured
+        return min(configured, FAST_BOOT_TIMEOUT_S) if self.fast else configured
 
     def _check_boot(self) -> Check:
         return self._run("boot", _EMULATOR_TITLES["boot"], self._boot_action)
@@ -685,9 +812,22 @@ class SelftestRunner:
             "status": status,
             "screenshot": getattr(record, "screenshot_path", "") or "",
         }
-        if activity or status == "verified":
+        if status == "verified":
             return ("pass", f"Setup Wizard activity: {activity or status}", payload)
-        return ("fail", f"no OOBE activity detected (status: {status or 'unknown'})", payload)
+        if status == "unsupported":
+            return (
+                "skip",
+                "the image ships no Setup Wizard, so there is no OOBE to detect"
+                f" (activity: {activity or 'unknown'}); verify an OOBE-capable image"
+                " such as system-images;android-25;google_apis;x86",
+                payload,
+            )
+        return (
+            "fail",
+            f"no OOBE activity detected (status: {status or 'unknown'};"
+            f" activity: {activity or 'none'})",
+            payload,
+        )
 
     def _check_proxies(self) -> Check:
         return self._run("proxies", _EMULATOR_TITLES["proxies"], self._proxies_action)
@@ -1213,7 +1353,14 @@ class SelftestRunner:
     def run(self) -> dict[str, Any]:
         started_at = _utcnow()
         started = time.monotonic()
-        self._activate_fakes()
+        if self.fakes:
+            # Only fakes mode needs the development test shims.  A real run must
+            # not require them: the installed console script has no 'tests'
+            # package on sys.path, so calling this unconditionally made
+            # 'avdfleet selftest --e2e' fail with an environment error on every
+            # real installation (it only worked via 'python -m avdfleet', which
+            # puts the working tree on sys.path).
+            self._activate_fakes()
         self._check_acceleration()
         accelerated = bool(self.acceleration.get("available")) or self.fakes
         if self.fakes:

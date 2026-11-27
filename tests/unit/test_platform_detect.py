@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,14 +28,17 @@ from avdfleet.platform import (
 )
 from avdfleet.platform import detect as detect_module
 from avdfleet.platform.detect import (
+    WINDOWS_11_MIN_BUILD,
     PlatformDetector,
     clear_host_cache,
     normalise_arch,
     normalise_host_os,
+    parse_windows_build,
     sdk_executables,
     sdk_paths,
     tool_executable,
     which_tool,
+    windows_product_name,
 )
 
 SYSTEMINFO_HYPERVISOR = """
@@ -216,6 +220,124 @@ def test_normalisers_accept_aliases() -> None:
     assert normalise_arch("aarch64") is CpuArch.ARM64
     assert normalise_arch("AMD64") is CpuArch.X86_64
     assert normalise_arch("sparc") is CpuArch.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Windows product identity (the build number, not ProductName, is authoritative)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_windows_build_accepts_probe_shapes() -> None:
+    assert parse_windows_build("26200") == 26200
+    assert parse_windows_build("10.0.26200") == 26200
+    assert parse_windows_build(22631) == 22631
+    assert parse_windows_build("") is None
+    assert parse_windows_build(None) is None
+    assert parse_windows_build(0) is None
+    assert parse_windows_build("not-a-build") is None
+
+
+@pytest.mark.parametrize(
+    ("product", "build", "expected"),
+    [
+        ("Windows 10 Pro", "26200", "Windows 11 Pro"),
+        ("Windows 10 Pro", 22631, "Windows 11 Pro"),
+        ("Microsoft Windows 10 Enterprise", "10.0.26100", "Microsoft Windows 11 Enterprise"),
+        ("Windows 10 Pro", "19045", "Windows 10 Pro"),
+        ("Windows 11 Pro", "19045", "Windows 10 Pro"),
+        ("Windows Server 2022 Standard", "20348", "Windows Server 2022 Standard"),
+        ("", "26200", ""),
+        (None, "26200", ""),
+        ("Windows 10 Pro", None, "Windows 10 Pro"),
+    ],
+)
+def test_windows_product_name_follows_the_build_number(
+    product: str | None, build: str | int | None, expected: str
+) -> None:
+    assert windows_product_name(product, build) == expected
+    assert WINDOWS_11_MIN_BUILD == 22000
+
+
+def _fake_windows_registry(monkeypatch: pytest.MonkeyPatch, **values: str) -> None:
+    monkeypatch.setattr(detect_module, "_registry_value", lambda _subkey, name: values.get(name))
+
+
+def test_windows_detection_reports_windows_11_from_build_26200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(detect_module, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(
+        detect_module,
+        "_platform",
+        SimpleNamespace(release=lambda: "11", version=lambda: "10.0.26200"),
+    )
+    _fake_windows_registry(
+        monkeypatch,
+        ProductName="Windows 10 Pro",
+        DisplayVersion="25H2",
+        CurrentBuildNumber="26200",
+    )
+    detector = PlatformDetector(environ={"PATH": ""})
+
+    os_name, os_version, details = detector._detect_os_identity(HostOS.WINDOWS, False)  # noqa: SLF001
+
+    assert os_name == "Windows 11 Pro"
+    assert os_version == "11 25H2 (build 26200)"
+    assert details["windows_product"] == "Windows 11 Pro"
+    # The raw registry value stays available as evidence.
+    assert details["windows_product_registry"] == "Windows 10 Pro"
+    assert details["windows_build_number"] == 26200
+
+
+def test_windows_detection_corrects_legacy_python_release_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(detect_module, "sys", SimpleNamespace(platform="win32"))
+    # Python before 3.13 reports 10.0 for Windows 11.
+    monkeypatch.setattr(
+        detect_module,
+        "_platform",
+        SimpleNamespace(release=lambda: "10", version=lambda: "10.0.26200"),
+    )
+    _fake_windows_registry(
+        monkeypatch,
+        ProductName="Windows 10 Home",
+        DisplayVersion="24H2",
+        CurrentBuildNumber="26100",
+    )
+    detector = PlatformDetector(environ={"PATH": ""})
+
+    os_name, os_version, details = detector._detect_os_identity(HostOS.WINDOWS, False)  # noqa: SLF001
+
+    assert os_name == "Windows 11 Home"
+    assert os_version == "11 24H2 (build 26100)"
+    assert details["windows_release"] == "11"
+    assert details["windows_release_reported"] == "10"
+
+
+def test_windows_detection_keeps_genuine_windows_10(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(detect_module, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(
+        detect_module,
+        "_platform",
+        SimpleNamespace(release=lambda: "10", version=lambda: "10.0.19045"),
+    )
+    _fake_windows_registry(
+        monkeypatch,
+        ProductName="Windows 10 Pro",
+        DisplayVersion="22H2",
+        CurrentBuildNumber="19045",
+    )
+    detector = PlatformDetector(environ={"PATH": ""})
+
+    os_name, os_version, details = detector._detect_os_identity(HostOS.WINDOWS, False)  # noqa: SLF001
+
+    assert os_name == "Windows 10 Pro"
+    assert os_version == "10 22H2 (build 19045)"
+    assert "windows_product_registry" not in details
+    assert details["windows_build_number"] == 19045
 
 
 def test_fake_environment_is_not_cached(

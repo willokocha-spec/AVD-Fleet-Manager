@@ -760,6 +760,17 @@ class OobeMatrixStore:
             raise ImageError("OOBE record requires a non-empty image_id")
         matrix = self.load()
         records = {existing.image_id: existing for existing in matrix.records if existing.image_id}
+        previous = records.get(record.image_id)
+        if (
+            previous is not None
+            and previous.status is OobeStatus.VERIFIED
+            and record.status is not OobeStatus.VERIFIED
+        ):
+            # A verified image must not lose its capability evidence because a
+            # later boot observed an already-provisioned AVD.  The Setup Wizard
+            # only appears on pristine userdata, so "launcher visible" describes
+            # the AVD's data state, not the image's ability to reach OOBE.
+            record = previous.model_copy(deep=True)
         records[record.image_id] = record.model_copy(deep=True)
         updated = OobeMatrix(
             version=matrix.version or "1",

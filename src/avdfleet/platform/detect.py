@@ -160,6 +160,47 @@ def normalise_arch(value: str | CpuArch | None) -> CpuArch:
     return _ARCH_ALIASES.get(str(value).strip().lower(), CpuArch.UNKNOWN)
 
 
+#: First Windows build that belongs to Windows 11.  Windows 11 still reports
+#: ``ProductName = "Windows 10 Pro"`` (and ``systeminfo`` prints the same "OS
+#: Name") on many machines for compatibility, so the build number -- not the
+#: product string -- decides which version is actually running.
+WINDOWS_11_MIN_BUILD = 22000
+
+_WINDOWS_PRODUCT_VERSION = re.compile(r"(?i)\bWindows\s+(10|11)\b")
+
+
+def parse_windows_build(value: str | int | None) -> int | None:
+    """Return the build number from ``26200`` or ``10.0.26200``-style values."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    numbers = re.findall(r"\d+", str(value))
+    if not numbers:
+        return None
+    return int(numbers[-1])
+
+
+def windows_product_name(product: str | None, build: str | int | None = None) -> str:
+    """Return an accurate Windows product name for the reported *build*.
+
+    Windows keeps the registry ``ProductName`` (and WMI ``OS Name``) as
+    "Windows 10 ..." even on Windows 11, so the build number is authoritative:
+    builds >= :data:`WINDOWS_11_MIN_BUILD` are Windows 11.  The edition suffix
+    ("Pro", "Enterprise", ...) is preserved verbatim; names without a
+    "Windows 10/11" token (e.g. server SKUs) are returned unchanged.
+    """
+    name = (product or "").strip()
+    if not name:
+        return ""
+    number = parse_windows_build(build)
+    if number is None:
+        return name
+    expected = "11" if number >= WINDOWS_11_MIN_BUILD else "10"
+    corrected, replacements = _WINDOWS_PRODUCT_VERSION.subn(f"Windows {expected}", name, count=1)
+    return corrected if replacements else name
+
+
 def detect_distro_id(environ: Mapping[str, str] | None = None) -> str | None:
     """Return the Linux distribution id (e.g. ``ubuntu``) or ``None``.
 
@@ -873,7 +914,8 @@ class PlatformDetector:
         if host_os is HostOS.WINDOWS:
             if simulated or sys.platform != "win32":
                 return platform_display_name(HostOS.WINDOWS), "", details
-            details["windows_release"] = _platform.release()
+            platform_release = _platform.release()
+            details["windows_release"] = platform_release
             details["windows_version"] = _platform.version()
             details["windows_build"] = str(_platform.version()).split(".")[-1]
             product = _registry_value(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ProductName")
@@ -887,8 +929,33 @@ class PlatformDetector:
                 details["windows_display_version"] = display
             if isinstance(build, str) and build:
                 details["windows_build"] = build
-            os_name = details.get("windows_product") or platform_display_name(HostOS.WINDOWS)
-            version_bits = [_platform.release(), details.get("windows_display_version", "")]
+
+            # Windows 11 machines commonly still advertise "Windows 10 Pro" in
+            # ProductName; the build number is what actually distinguishes the
+            # two versions, so correct the reported product name from it.
+            build_number = parse_windows_build(details.get("windows_build"))
+            if build_number is not None:
+                details["windows_build_number"] = build_number
+            product_name = windows_product_name(details.get("windows_product"), build_number)
+            if product_name and product_name != details.get("windows_product"):
+                details["windows_product_registry"] = details.get("windows_product", "")
+            if product_name:
+                details["windows_product"] = product_name
+
+            os_name = product_name or platform_display_name(HostOS.WINDOWS)
+            release = platform_release
+            if (
+                build_number is not None
+                and build_number >= WINDOWS_11_MIN_BUILD
+                and release in {"10", "10.0"}
+            ):
+                # Older Python releases report 10.0 for Windows 11.  Keep the
+                # established "<release> <display> (build N)" shape, but make
+                # its version token agree with the corrected product name.
+                release = "11"
+                details["windows_release_reported"] = platform_release
+                details["windows_release"] = release
+            version_bits = [release, details.get("windows_display_version", "")]
             os_version = " ".join(bit for bit in version_bits if bit).strip()
             if details.get("windows_build"):
                 os_version = f"{os_version} (build {details['windows_build']})".strip()
@@ -1382,6 +1449,7 @@ __all__ = [
     "FAKE_SDK_ROOT_ENV",
     "JAVA_HOME_ENV",
     "PlatformDetector",
+    "WINDOWS_11_MIN_BUILD",
     "clear_host_cache",
     "detect_distro_id",
     "detect_host",
@@ -1390,9 +1458,11 @@ __all__ = [
     "kvm_group_name",
     "normalise_arch",
     "normalise_host_os",
+    "parse_windows_build",
     "real_host_os",
     "sdk_executables",
     "sdk_paths",
     "tool_executable",
     "which_tool",
+    "windows_product_name",
 ]

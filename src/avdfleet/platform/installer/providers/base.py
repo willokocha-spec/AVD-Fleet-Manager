@@ -158,6 +158,8 @@ class InstallProvider(ABC):
         self._env: dict[str, str] = dict(os.environ if env is None else env)
         self._is_admin_override = is_admin
         self._which_override = which
+        #: PATH re-read by :meth:`refresh_path` (``None`` until refreshed).
+        self._refreshed_path: str | None = None
         self._arch = arch or _detect_arch(self._env)
 
     # ------------------------------------------------------------------
@@ -190,12 +192,74 @@ class InstallProvider(ABC):
         if not binary:
             return None
         if self._which_override is not None:
-            return self._which_override(binary)
+            found = self._which_override(binary)
+            if found is None and self._refreshed_path:
+                # The injected resolver saw the original PATH; consult the
+                # persisted one as well before declaring the tool missing.
+                found = shutil.which(binary, path=self._refreshed_path)
+            return found
         search_path = self._env.get("PATH") or self._env.get("Path") or os.environ.get("PATH")
         return shutil.which(binary, path=search_path)
 
     def command_exists(self, binary: str) -> bool:
         return self.which(binary) is not None
+
+    def refresh_path(self) -> str:
+        """Refresh this provider's ``PATH`` so freshly installed tools resolve.
+
+        Package managers update the *persisted* environment, but a process that
+        is already running -- this installer -- keeps the ``PATH`` it started
+        with.  winget additionally exposes portable packages as shims under
+        ``%LOCALAPPDATA%\\Microsoft\\WinGet\\Links``.  Re-reading both before
+        declaring an install missing avoids a false "not installed" verdict
+        for a tool that a new shell can already see.
+
+        Returns the refreshed ``PATH`` (also cached in the provider
+        environment for subsequent :meth:`which` calls).
+        """
+        entries: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str | None) -> None:
+            for entry in str(value or "").split(os.pathsep):
+                entry = entry.strip()
+                if not entry or entry in seen:
+                    continue
+                seen.add(entry)
+                entries.append(entry)
+
+        add(self._env.get("PATH") or self._env.get("Path"))
+        add(self._persisted_path())
+        for directory in self._windows_shim_dirs():
+            add(directory)
+        if entries:
+            self._env["PATH"] = os.pathsep.join(entries)
+            self._env.pop("Path", None)
+        self._refreshed_path = self._env.get("PATH") or None
+        return self._refreshed_path or ""
+
+    def _persisted_path(self) -> str | None:
+        """``PATH`` persisted for new processes (Windows user environment)."""
+        if self.platform is not HostOS.WINDOWS:
+            return None
+        return self.get_env_var("PATH", EnvScope.USER)
+
+    def _windows_shim_dirs(self) -> list[str]:
+        """Directories where Windows package managers place command shims."""
+        if self.platform is not HostOS.WINDOWS:
+            return []
+        local_app_data = self.env_value("LOCALAPPDATA")
+        if not local_app_data:
+            home = self.env_value("USERPROFILE") or self.env_value("HOME")
+            if home:
+                local_app_data = str(Path(home) / "AppData" / "Local")
+        if not local_app_data:
+            return []
+        base = Path(local_app_data)
+        return [
+            str(base / "Microsoft" / "WinGet" / "Links"),
+            str(base / "Microsoft" / "WindowsApps"),
+        ]
 
     def env_value(self, name: str, default: str = "") -> str:
         return self._env.get(name, default)

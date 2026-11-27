@@ -284,7 +284,11 @@ def build_emulator_argv(
     if no_snapshot_save:
         argv.append("-no-snapshot-save")
     if wipe_data:
-        argv.append("-wipe-data")
+        # Pair the wipe with a full snapshot reset.  A quickboot snapshot saved by
+        # an earlier boot still holds the old (possibly provisioned) userdata, so
+        # restoring it silently defeats ``-wipe-data``: the guest comes back on
+        # the launcher instead of the Setup Wizard.
+        argv.extend(["-wipe-data", "-no-snapshot"])
     if proxy_upstream:
         argv.extend(["-http-proxy", validate_proxy_upstream(proxy_upstream)])
     for item in extra_args:

@@ -625,7 +625,10 @@ def test_verify_image_success_records_and_cleans_up(tmp_path: Path) -> None:
     assert harness.avds.deleted[0][1] is True
     assert not harness.runtime.running
     starts = harness.runtime.calls_of("start")
-    assert starts and starts[0] == ("start", created["name"], False)
+    # OOBE verification must boot a pristine data partition: the temporary AVD
+    # name is deterministic per image, so a repeat verification would otherwise
+    # observe the previous run's provisioned userdata (launcher, not wizard).
+    assert starts and starts[0] == ("start", created["name"], True)
     wait = harness.runtime.calls_of("wait_boot")
     assert wait and wait[0][2] == 90.0
 

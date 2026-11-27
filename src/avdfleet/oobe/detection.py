@@ -16,6 +16,11 @@ top activity is classified as:
     The Setup Wizard (``com.google.android.setupwizard`` /
     ``SetupWizardActivity`` and equivalents) is in the foreground: the guest is
     still in the out-of-box experience.
+``provisioning``
+    The guest is in the unprovisioned first-boot state
+    (``com.android.settings/.FallbackHome`` or a provisioning activity).  Stock
+    emulator images have no Setup Wizard, so this is the furthest "not set up"
+    state they can reach.
 ``launcher``
     A launcher/home activity is in the foreground: first-run setup has already
     completed on this AVD.
@@ -56,6 +61,29 @@ LAUNCHER_PACKAGES: tuple[str, ...] = (
     "com.android.launcher3",
     "com.android.launcher",
 )
+
+PROVISIONING_TOKENS: tuple[str, ...] = (
+    "fallbackhome",
+    "com.android.provision",
+    "provisionactivity",
+    "googlesdksetup",
+)
+"""Tokens identifying the unprovisioned first-boot state.
+
+Stock emulator system images (AOSP ``default``, ``google_apis`` and
+``google_apis_playstore``) ship **no** Google Setup Wizard and bake
+``ro.setupwizard.mode=DISABLED`` into the image, so a freshly wiped AVD never
+shows a visual wizard.  What it does show while first-run setup is still
+pending is one of two placeholder activities, both observed on real boots:
+
+* ``com.google.android.googlesdksetup/.DefaultActivity`` - the emulator's own
+  SDK-setup stub, shown immediately after boot; and
+* ``com.android.settings/.FallbackHome`` - the blank HOME placeholder the
+  framework keeps until ``device_provisioned`` flips to 1.
+
+That state is the closest thing to an OOBE those images can reach, so it is
+classified explicitly instead of being reported as ``unknown``.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +243,7 @@ def call_runner(
 
 class ActivityKind(StrEnum):
     SETUP_WIZARD = "setup_wizard"
+    PROVISIONING = "provisioning"
     LAUNCHER = "launcher"
     UNKNOWN = "unknown"
 
@@ -324,6 +353,8 @@ def classify_top_activity(top: TopActivity) -> ActivityKind:
         return ActivityKind.SETUP_WIZARD
     if "oobe" in haystack and "setup" in haystack:
         return ActivityKind.SETUP_WIZARD
+    if any(token in haystack for token in PROVISIONING_TOKENS):
+        return ActivityKind.PROVISIONING
     if any(package.lower() in haystack for package in LAUNCHER_PACKAGES):
         return ActivityKind.LAUNCHER
     if "launcher" in haystack or "homeactivity" in haystack or "launcherhome" in haystack:

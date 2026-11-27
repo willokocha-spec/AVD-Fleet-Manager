@@ -18,9 +18,15 @@ The implementation is deliberately small and dependency free:
 
 ``relocate``/N1 can construct it without knowing the home directory: the token
 is discovered from ``AVDFLEET_FAKE_HOME``, ``ANDROID_EMULATOR_HOME``,
-``HOME``/``USERPROFILE`` and finally ``Path.home()`` (in that order), matching
-both the fakes contract (``<fake_home>/.emulator_console_auth_token``) and a
-real host (``~/.emulator_console_auth_token``).
+``HOME``/``USERPROFILE`` and, only for the real process environment,
+``Path.home()`` (in that order), matching both the fakes contract
+(``<fake_home>/.emulator_console_auth_token``) and a real host
+(``~/.emulator_console_auth_token``).
+
+A caller-supplied ``environ`` is authoritative: it is never merged with (or
+completed from) the real process environment, so a hermetic mapping with empty
+``HOME``/``USERPROFILE`` cannot silently fall back to the host user's token
+file.
 """
 
 from __future__ import annotations
@@ -85,27 +91,76 @@ class _ConsoleEOF(EmulatorConsoleError):
 # ---------------------------------------------------------------------------
 
 
+def _token_directory(
+    value: str | Path,
+    env: Mapping[str, str],
+    *,
+    allow_real_home: bool,
+) -> Path | None:
+    """Resolve one candidate directory without escaping *env*.
+
+    ``~`` is expanded from the supplied environment.  When that environment
+    declares no home directory the candidate is dropped instead of quietly
+    falling back to the real user profile (``Path.home()``), which would leak
+    the host's token file into a hermetic call.
+    """
+    raw = str(value)
+    if raw.startswith("~"):
+        suffix = raw[1:]
+        if suffix and suffix[0] not in "/\\":
+            # ``~user`` needs the real account database; only the real
+            # process environment is allowed to resolve it.
+            if not allow_real_home:
+                return None
+            try:
+                return Path(raw).expanduser()
+            except (RuntimeError, KeyError):  # pragma: no cover - exotic sandboxes
+                return None
+        declared_home = env.get("HOME") or env.get("USERPROFILE")
+        if declared_home:
+            raw = declared_home.rstrip("/\\") + suffix
+        elif allow_real_home:
+            try:
+                return Path(raw).expanduser()
+            except (RuntimeError, KeyError):  # pragma: no cover - exotic sandboxes
+                return None
+        else:
+            return None
+    return Path(raw)
+
+
 def console_token_paths(
     home: str | Path | None = None,
     *,
     environ: Mapping[str, str] | None = None,
 ) -> list[Path]:
-    """Candidate token-file paths, most specific first (deterministic order)."""
+    """Candidate token-file paths, most specific first (deterministic order).
+
+    When *environ* is supplied it is the sole source of environment facts: the
+    real process environment and ``Path.home()`` are never consulted.
+    """
+    real_environment = environ is None
     env = dict(os.environ if environ is None else environ)
-    candidates: list[Path] = []
+    directories: list[str | Path] = []
     if home:
-        candidates.append(Path(home).expanduser() / TOKEN_FILENAME)
+        directories.append(home)
     for variable in TOKEN_HOMES:
         value = env.get(variable)
         if value:
-            candidates.append(Path(value).expanduser() / TOKEN_FILENAME)
+            directories.append(value)
     user_home = env.get("HOME") or env.get("USERPROFILE")
     if user_home:
-        candidates.append(Path(user_home).expanduser() / TOKEN_FILENAME)
-    try:
-        candidates.append(Path.home() / TOKEN_FILENAME)
-    except (RuntimeError, KeyError):  # pragma: no cover - exotic sandboxes
-        pass
+        directories.append(user_home)
+    candidates: list[Path] = []
+    for directory in directories:
+        resolved = _token_directory(directory, env, allow_real_home=real_environment)
+        if resolved is not None:
+            candidates.append(resolved / TOKEN_FILENAME)
+    if real_environment:
+        try:
+            candidates.append(Path.home() / TOKEN_FILENAME)
+        except (RuntimeError, KeyError):  # pragma: no cover - exotic sandboxes
+            pass
     unique: list[Path] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -121,13 +176,21 @@ def resolve_console_token(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> str | None:
-    """Read the console auth token, or ``None`` when authentication is disabled."""
+    """Read the console auth token, or ``None`` when authentication is disabled.
+
+    Precedence: token environment variables, then token files (the explicit
+    *home* first, then directories declared by *environ*).  A supplied
+    *environ* is authoritative: no real-host value is used as a fallback, so
+    the returned token is ``None`` whenever the caller's environment has none.
+    """
     env = dict(os.environ if environ is None else environ)
     for variable in TOKEN_ENV_VARS:
         value = env.get(variable)
         if value:
-            return value.strip()
-    for path in console_token_paths(home, environ=env):
+            token = value.strip()
+            if token:
+                return token
+    for path in console_token_paths(home, environ=environ):
         try:
             token = path.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
@@ -152,7 +215,9 @@ class EmulatorConsole:
             console.kill()
 
     ``token`` and ``home`` are optional overrides for tests and portable
-    deployments; otherwise discovery is automatic (see module docstring).
+    deployments; otherwise discovery is automatic (see module docstring).  An
+    empty ``token`` disables the ``auth`` handshake, and a supplied ``environ``
+    replaces (never extends) the process environment used for discovery.
     """
 
     def __init__(
@@ -168,7 +233,10 @@ class EmulatorConsole:
         self.host = host
         self._explicit_token = token
         self.home = Path(home) if home is not None else None
-        self._environ = dict(os.environ if environ is None else environ)
+        # ``None`` keeps discovery on the real process environment; a
+        # caller-supplied mapping is authoritative and never completed from
+        # ``os.environ``.
+        self._environ: Mapping[str, str] | None = None if environ is None else dict(environ)
         self.connect_timeout_s = float(connect_timeout_s)
         self.command_timeout_s = float(command_timeout_s)
         self.port: int | None = None
@@ -185,7 +253,11 @@ class EmulatorConsole:
         if not 1 <= self.port <= 65535:
             raise EmulatorConsoleError(f"invalid emulator console port: {port}")
         timeout = self.connect_timeout_s if timeout_s is None else float(timeout_s)
-        self._token = self._explicit_token or resolve_console_token(self.home, environ=self._environ)
+        self._token = (
+            resolve_console_token(self.home, environ=self._environ)
+            if self._explicit_token is None
+            else self._explicit_token.strip() or None
+        )
         try:
             sock = socket.create_connection((self.host, self.port), timeout=timeout)
         except OSError as exc:
@@ -336,6 +408,8 @@ class EmulatorConsole:
                     f"emulator console rejected the connection: {redact(stripped)}"
                 )
         if self._token:
+            # No token means authentication is disabled or nothing was
+            # discoverable: never send an ``auth`` line in that case.
             self._send_line(f"auth {self._token}")
             auth_deadline = time.monotonic() + timeout
             while True:

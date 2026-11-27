@@ -21,6 +21,7 @@ import contextlib
 import io
 import json
 import os
+import platform
 import re
 import shutil
 import socket
@@ -1237,8 +1238,48 @@ def _zip_payload_start(data: bytes) -> int | None:
     return start
 
 
-def find_launcher_stub() -> bytes | None:
-    """Locate a pip-style console-script launcher stub in this interpreter."""
+def _launcher_arch_candidates() -> tuple[str, ...]:
+    """distlib launcher images that can host this interpreter, best first."""
+    machine = (os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine() or "").lower()
+    if struct.calcsize("P") < 8:
+        return ("t32.exe",)
+    candidates = ["t64-arm.exe", "t64.exe", "t32.exe"] if "arm" in machine else ["t64.exe", "t32.exe"]
+    return tuple(candidates)
+
+
+def _launcher_stub_from_exe(data: bytes) -> bytes | None:
+    """Return the bare launcher image of an installed console-script exe.
+
+    distlib writes ``<launcher image><#!interpreter line><zip payload>``, so the
+    image is the prefix in front of the ZIP with that interpreter line removed.
+    """
+    if not data.startswith(b"MZ"):
+        return None
+    start = _zip_payload_start(data)
+    if start is None or start < 1024:
+        return None
+    prefix = data[:start]
+    index = prefix.rfind(b"#!")
+    if index > 0:
+        line = prefix[index:]
+        if line.endswith(b"\n") and b"\x00" not in line and b"\n" not in line[:-1]:
+            return prefix[:index]
+    return prefix
+
+
+def _launcher_stub_from_directory(directory: Path) -> bytes | None:
+    for name in _launcher_arch_candidates():
+        try:
+            data = (directory / name).read_bytes()
+        except OSError:
+            continue
+        if data.startswith(b"MZ") and len(data) > 20_000:
+            return data
+    return None
+
+
+def _installed_launcher_stub() -> bytes | None:
+    """Find a distlib launcher among this environment's console scripts."""
     import sysconfig
 
     directories: list[Path] = []
@@ -1258,32 +1299,101 @@ def find_launcher_stub() -> bytes | None:
                 data = candidate.read_bytes()
             except OSError:
                 continue
-            if not data.startswith(b"MZ"):
-                continue
-            start = _zip_payload_start(data)
-            if start is None or start < 1024:
-                continue
-            stub = data[:start]
-            if stub[:2] == b"MZ" and data[start:].startswith(b"PK"):
+            stub = _launcher_stub_from_exe(data)
+            if stub is not None:
                 return stub
     return None
 
 
-def launcher_payload(stub: bytes, tool: str, fake_cli: str | Path) -> bytes:
-    """Build a ``<tool>.exe`` payload: launcher stub + appended dispatch ZIP."""
+def _vendored_launcher_stub() -> bytes | None:
+    """Read a distlib launcher shipped with pip, installed or via ``ensurepip``."""
+    import zipfile
+
+    try:
+        import pip._vendor.distlib as _distlib  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - depends on the environment
+        _distlib = None
+    if _distlib is not None:
+        stub = _launcher_stub_from_directory(Path(_distlib.__file__).parent)
+        if stub is not None:
+            return stub
+    # ``ensurepip`` carries pip as a wheel inside the interpreter even when pip
+    # itself is not installed (``uv``-created virtualenvs, for instance).
+    try:
+        import ensurepip
+    except Exception:  # pragma: no cover - stripped interpreters
+        return None
+    try:
+        wheels = sorted((Path(ensurepip.__file__).parent / "_bundled").glob("pip-*.whl"))
+    except OSError:  # pragma: no cover - defensive
+        return None
+    for wheel in wheels:
+        try:
+            with zipfile.ZipFile(wheel) as archive:
+                for name in _launcher_arch_candidates():
+                    try:
+                        data = archive.read(f"pip/_vendor/distlib/{name}")
+                    except KeyError:
+                        continue
+                    if data.startswith(b"MZ"):
+                        return data
+        except (OSError, zipfile.BadZipFile):  # pragma: no cover - corrupt wheel
+            continue
+    return None
+
+
+def find_launcher_stub() -> bytes | None:
+    """Locate a bare pip/distlib console-script launcher image for this host.
+
+    The returned bytes are the native launcher only: :func:`launcher_payload`
+    appends the ``#!`` interpreter line and the ZIP payload the launcher runs.
+    Discovery cannot rely on installed console scripts alone - ``uv`` (and
+    several other installers) create them with a private trampoline format that
+    is not distlib compatible, so the launcher shipped with pip is tried first.
+    """
+    return _vendored_launcher_stub() or _installed_launcher_stub()
+
+
+def _enquote_executable(path: str) -> str:
+    """Quote a shebang interpreter path the way distlib does."""
+    if " " in path and not path.startswith('"'):
+        return f'"{path}"'
+    return path
+
+
+def launcher_payload(
+    stub: bytes,
+    tool: str,
+    fake_cli: str | Path,
+    *,
+    python_exe: str | Path | None = None,
+) -> bytes:
+    """Build a ``<tool>.exe`` payload: launcher image + shebang + dispatch ZIP.
+
+    The distlib launcher needs the ``#!`` line to find the interpreter to run;
+    without it the executable exits silently with status 1.
+    """
     import zipfile
 
     script = _LAUNCHER_MAIN.format(fake_cli=str(Path(fake_cli).resolve()), tool=tool)
+    interpreter = _enquote_executable(str(python_exe or sys.executable))
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("__main__.py", script)
-    return stub + buffer.getvalue()
+    return stub + b"#!" + os.fsencode(interpreter) + b"\n" + buffer.getvalue()
 
 
-def write_launcher_exe(path: str | Path, tool: str, fake_cli: str | Path, stub: bytes) -> Path:
+def write_launcher_exe(
+    path: str | Path,
+    tool: str,
+    fake_cli: str | Path,
+    stub: bytes,
+    *,
+    python_exe: str | Path | None = None,
+) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(launcher_payload(stub, tool, fake_cli))
+    target.write_bytes(launcher_payload(stub, tool, fake_cli, python_exe=python_exe))
     return target
 
 
@@ -1595,7 +1705,9 @@ class FakeTools:
             for tool in TOOLS:
                 self._write_windows_cmd_shim(tool)
                 if stub is not None:
-                    write_launcher_exe(self.paths.bin / f"{tool}.exe", tool, self.fake_cli, stub)
+                    write_launcher_exe(
+                        self.paths.bin / f"{tool}.exe", tool, self.fake_cli, stub, python_exe=self.python
+                    )
                 else:  # pragma: no cover - only on Python installs without launchers
                     self._write_legacy_windows_exe(tool)
             if stub is None:  # pragma: no cover - legacy fallback path

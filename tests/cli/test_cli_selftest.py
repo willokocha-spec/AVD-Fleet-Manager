@@ -12,13 +12,16 @@ The self-test is the command operators run on a real host to produce the BRIEF
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from avdfleet.core.models import InstanceResult, RunState, ScriptRun
+from avdfleet.core.models import InstanceResult, InstanceState, RunState, ScriptRun
 
 from . import (
     ServiceStub,
     build_stub_container,
+    default_instance,
     invoke,
     invoke_json,
     output_text,
@@ -90,6 +93,45 @@ def test_quick_mode_human_summary(env) -> None:
     assert "avdfleet selftest" in text
     assert "summary:" in text
     assert "selftest passed" in text
+
+
+# ---------------------------------------------------------------------------
+# Fakes activation is opt-in
+# ---------------------------------------------------------------------------
+
+
+def test_real_run_never_activates_development_fakes(env, monkeypatch) -> None:
+    """A run without ``--fakes`` must not touch the development fakes.
+
+    The installed console script has no ``tests`` package on ``sys.path``, so
+    the old unconditional ``_activate_fakes()`` made ``avdfleet selftest --e2e``
+    abort with an environment error on every real installation.  It only worked
+    through ``python -m avdfleet``, which puts the checkout on ``sys.path``.
+    """
+    from avdfleet.cli.commands.selftest import SelftestRunner
+
+    calls: list[bool] = []
+
+    def _must_not_run(self) -> None:  # pragma: no cover - assertion path
+        calls.append(True)
+        raise AssertionError("_activate_fakes must not run without --fakes")
+
+    monkeypatch.setattr(SelftestRunner, "_activate_fakes", _must_not_run)
+    result, payload = invoke_json(["selftest"])
+    assert result.exit_code == 0, output_text(result)
+    assert calls == []
+    assert payload["mode"]["fakes"] is False
+
+
+def test_fakes_run_activates_development_fakes(env, monkeypatch) -> None:
+    """``--fakes`` still activates the fakes (the opt-in path is preserved)."""
+    from avdfleet.cli.commands.selftest import SelftestRunner
+
+    calls: list[bool] = []
+    monkeypatch.setattr(SelftestRunner, "_activate_fakes", lambda self: calls.append(True))
+    result, payload = invoke_json(["selftest", "--fakes"])
+    assert calls == [True]
+    assert payload["mode"]["fakes"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +259,105 @@ def test_keep_retains_created_resources(monkeypatch, tmp_path) -> None:
     assert env.service("avds").called("list_instances")  # created
     assert not env.service("avds").called("delete_instance")
     assert any("--keep" in note for note in payload["notes"])
+
+
+# ---------------------------------------------------------------------------
+# Re-runnability: previous self-test leftovers are cleaned up
+# ---------------------------------------------------------------------------
+
+
+def _make_orphaned_selftest_artifacts(env) -> tuple[Path, Path]:
+    """Create the .avd directory + .ini pointer an interrupted run leaves."""
+    avd_home = Path(env.paths.avd_home)
+    orphan_dir = avd_home / "selftest-01.avd"
+    orphan_dir.mkdir(parents=True)
+    (orphan_dir / "config.ini").write_text("hw.ramSize=2048\n", encoding="utf-8")
+    orphan_ini = avd_home / "selftest-01.ini"
+    orphan_ini.write_text("path=selftest-01.avd\n", encoding="utf-8")
+    return orphan_dir, orphan_ini
+
+
+def test_cleanup_removes_orphaned_selftest_avd_artifacts(env) -> None:
+    """An orphaned AVD that ``avd list`` cannot see must not break a rerun.
+
+    The first self-test run can leave ``selftest-01.avd``/``selftest-01.ini``
+    behind while the AVD service no longer reports the AVD; the second run then
+    failed with "an AVD named 'selftest-01' already exists".  Cleanup must
+    remove the on-disk leftovers before deploying.
+    """
+    orphan_dir, orphan_ini = _make_orphaned_selftest_artifacts(env)
+    assert orphan_dir.is_dir() and orphan_ini.is_file()
+
+    result, payload = invoke_json(["selftest", "--fakes"])
+    assert result.exit_code == 0, output_text(result)
+    checks = _by_id(payload)
+    assert checks["instances"]["status"] == "pass", checks["instances"]
+    assert not orphan_dir.exists()
+    assert not orphan_ini.exists()
+    assert not [note for note in payload["notes"] if note.startswith("cleanup problems:")]
+
+
+def test_cleanup_keeps_non_selftest_avd_artifacts(env) -> None:
+    """Cleanup is prefix-scoped: unrelated AVDs in the AVD home stay untouched."""
+    avd_home = Path(env.paths.avd_home)
+    device_dir = avd_home / "Device.avd"
+    device_dir.mkdir()
+    (device_dir / "config.ini").write_text("hw.ramSize=2048\n", encoding="utf-8")
+    device_ini = avd_home / "Device.ini"
+    device_ini.write_text("path=Device.avd\n", encoding="utf-8")
+    lookalike = avd_home / "selftestish.avd"  # starts with 'selftest', but not 'selftest-'
+    lookalike.mkdir()
+
+    result, payload = invoke_json(["selftest", "--fakes"])
+    assert result.exit_code == 0, output_text(result)
+    assert _by_id(payload)["instances"]["status"] == "pass"
+    assert device_dir.is_dir()
+    assert device_ini.is_file()
+    assert lookalike.is_dir()
+
+
+def test_cleanup_failure_is_reported_in_notes(env, monkeypatch) -> None:
+    """A failed artifact removal is reported in ``notes``, never swallowed."""
+    from avdfleet.cli.commands.selftest import SelftestRunner
+
+    orphan_dir, orphan_ini = _make_orphaned_selftest_artifacts(env)
+
+    def _failing_remove(self, path: Path) -> None:
+        raise PermissionError(f"access denied removing {path.name}")
+
+    monkeypatch.setattr(SelftestRunner, "_remove_selftest_artifact", _failing_remove)
+
+    result, payload = invoke_json(["selftest", "--fakes"])
+    assert result.exit_code == 0, output_text(result)
+    assert orphan_dir.is_dir() and orphan_ini.is_file()
+    cleanup_notes = [note for note in payload["notes"] if note.startswith("cleanup problems:")]
+    assert cleanup_notes, payload["notes"]
+    assert "selftest-01.avd" in cleanup_notes[0]
+    assert "selftest-01.ini" in cleanup_notes[0]
+    assert "access denied" in cleanup_notes[0]
+
+
+def test_cleanup_stops_running_orphan_emulator_before_removal(env) -> None:
+    """A still-running orphan is stopped through the runtime before its files go."""
+    orphan_dir, orphan_ini = _make_orphaned_selftest_artifacts(env)
+    runtime = env.service("runtime")
+    stop_calls: list[tuple[str, bool]] = []
+
+    def list_running():
+        return [default_instance("selftest-01", state=InstanceState.RUNNING)]
+
+    def stop(name, **kwargs):
+        stop_calls.append((name, orphan_dir.exists()))
+        return default_instance(name, state=InstanceState.STOPPED)
+
+    runtime._methods["list_running"] = list_running
+    runtime._methods["stop"] = stop
+
+    result, payload = invoke_json(["selftest", "--fakes"])
+    assert result.exit_code == 0, output_text(result)
+    assert not orphan_dir.exists() and not orphan_ini.exists()
+    # The first stop is the pre-deploy cleanup, while the orphan still exists.
+    assert stop_calls[0] == ("selftest-01", True), stop_calls
 
 
 # ---------------------------------------------------------------------------

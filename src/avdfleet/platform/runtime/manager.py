@@ -472,6 +472,29 @@ class RuntimeManagerService:
             persisted = self._state_store.load(name)
             return persisted or AvdInfo(name=name)
 
+    @staticmethod
+    def _derive_image_id(info: AvdInfo) -> str:
+        """Best-effort system-image id for an AVD created outside AVD Fleet.
+
+        ``avdmanager create avd`` writes
+        ``image.sysdir.1=system-images\\android-34\\google_apis\\x86_64\\`` into the
+        instance's ``config.ini``; that relative path *is* the SDK package id once
+        the separators are normalised to ``;``.  Adopted AVDs have neither an
+        ``image_id`` nor a template, so without this fallback they were listed by
+        ``avdfleet avd list`` but could never be started - ``start`` failed with
+        "has no system image" even though the image was installed and bootable.
+        """
+        config = getattr(info, "config", None) or {}
+        if not isinstance(config, dict):
+            return ""
+        raw = str(config.get("image.sysdir.1") or config.get("image.sysdir.2") or "").strip()
+        if not raw:
+            return ""
+        parts = [part for part in re.split(r"[\\/]+", raw.strip("\\/")) if part]
+        if len(parts) < 3 or parts[0] != "system-images":
+            return ""
+        return ";".join(parts)
+
     def _avd_home(self) -> Path | None:
         home = getattr(self.avds, "avd_home", None)
         if home:
@@ -928,7 +951,11 @@ class RuntimeManagerService:
                     hint="The process was started outside this daemon; stop it first.",
                 )
             template = self._template_for(base_info)
-            image_id = base_info.image_id or (template.image_id if template else None)
+            image_id = (
+                base_info.image_id
+                or (template.image_id if template else None)
+                or self._derive_image_id(base_info)
+            )
             if not image_id:
                 raise ValidationError(
                     f"instance {candidate!r} has no system image",

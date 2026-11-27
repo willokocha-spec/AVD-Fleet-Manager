@@ -886,6 +886,47 @@ def test_oobe_failed_record_emits_warning(tmp_path: Path) -> None:
     assert find_image(service.list_images(), STOCK_GOOGLE_APIS_35).oobe_status is OobeStatus.FAILED
 
 
+def test_oobe_verified_record_survives_a_later_launcher_observation(tmp_path: Path) -> None:
+    """A verified image must not be downgraded by an already-provisioned AVD.
+
+    The Setup Wizard only appears on pristine userdata, so observing the launcher
+    on a reused AVD says nothing about the image.  Before this fix a later
+    ``failed`` record overwrote the ``verified`` one, the image lost its OOBE
+    evidence, and ``selftest`` then preferred an unverified image.
+    """
+    paths = make_paths(tmp_path)
+    service = ImageService(paths)
+    verified = OobeRecord(
+        image_id=STOCK_GOOGLE_APIS_35,
+        api_level=35,
+        tag="google_apis",
+        abi="x86_64",
+        status=OobeStatus.VERIFIED,
+        activity="com.google.android.setupwizard/.SetupWizardActivity",
+        boot_seconds=45.5,
+        checked_by="test",
+        checked_at=utcnow(),
+        evidence=["shots/wizard.png"],
+    )
+    service.update_oobe_record(verified)
+
+    launcher = OobeRecord(
+        image_id=STOCK_GOOGLE_APIS_35,
+        api_level=35,
+        tag="google_apis",
+        abi="x86_64",
+        status=OobeStatus.FAILED,
+        activity="com.google.android.apps.nexuslauncher/.NexusLauncherActivity",
+        notes="already provisioned AVD",
+    )
+    service.update_oobe_record(launcher)
+
+    record = service.oobe_matrix().get(STOCK_GOOGLE_APIS_35)
+    assert record is not None
+    assert record.status is OobeStatus.VERIFIED
+    assert "SetupWizardActivity" in record.activity
+
+
 def test_oobe_matrix_marks_unknown_images_unverified(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     service = ImageService(paths)

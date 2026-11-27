@@ -636,6 +636,92 @@ def test_scrcpy_step_is_optional(tmp_path: Path) -> None:
     assert ScrcpyStep.critical is False
 
 
+def _real_execution_runner(handler: Any | None = None) -> RecordingRunner:
+    """Recording runner that behaves like a real (non-simulated) execution."""
+    runner = RecordingRunner(handler=handler)
+    runner.simulate_effects = False
+    return runner
+
+
+def test_scrcpy_step_does_not_claim_success_without_the_binary(tmp_path: Path) -> None:
+    # winget/brew exited 0 but the tool is nowhere to be found.
+    runner = _real_execution_runner()
+    context = make_context(tmp_path, runner=runner)
+
+    result = ScrcpyStep().run(context)
+
+    assert result.ok is False
+    assert "no 'scrcpy' executable is on PATH" in result.message
+    assert "stub-install scrcpy" in " ".join(runner.invocations[0])
+    # The failure is actionable and the step can never abort the install.
+    hint = result.data["hint"]
+    assert "optional" in hint
+    assert "stub-pkg" in hint
+    assert "avdfleet install --repair --only tools.scrcpy" in hint
+    assert ScrcpyStep.critical is False
+
+
+def test_scrcpy_step_reports_the_resolved_binary_and_version(tmp_path: Path) -> None:
+    provider = StubProvider(root=tmp_path, binaries={"scrcpy": "/stub/bin/scrcpy"})
+
+    def handler(argv: list[str], stdin: str | None, env: dict[str, str]) -> CommandResult:
+        if argv[-1] == "--version":
+            return CommandResult(argv=argv, exit_code=0, stdout="scrcpy 3.1\n")
+        return CommandResult(argv=argv, exit_code=0)
+
+    runner = _real_execution_runner(handler)
+    context = make_context(tmp_path, provider=provider, runner=runner)
+
+    result = ScrcpyStep().run(context)
+
+    assert result.ok is True
+    assert result.data["scrcpy"] == "/stub/bin/scrcpy"
+    assert result.data["version"] == "scrcpy 3.1"
+    assert "scrcpy 3.1" in result.message
+    assert runner.invocations[-1] == ["/stub/bin/scrcpy", "--version"]
+
+
+def test_scrcpy_step_rereads_path_before_declaring_failure(tmp_path: Path) -> None:
+    # Simulates winget updating the persisted PATH: the binary only appears
+    # after the provider refreshes its environment.
+    provider = StubProvider(root=tmp_path)
+    refreshes: list[bool] = []
+
+    def refresh_path() -> str:
+        refreshes.append(True)
+        provider.binaries["scrcpy"] = "/stub/late/scrcpy"
+        return "/stub/late"
+
+    provider.refresh_path = refresh_path  # type: ignore[method-assign]
+
+    def handler(argv: list[str], stdin: str | None, env: dict[str, str]) -> CommandResult:
+        if argv[-1] == "--version":
+            return CommandResult(argv=argv, exit_code=0, stdout="scrcpy 3.1\n")
+        return CommandResult(argv=argv, exit_code=0)
+
+    runner = _real_execution_runner(handler)
+    context = make_context(tmp_path, provider=provider, runner=runner)
+
+    result = ScrcpyStep().run(context)
+
+    assert refreshes == [True]
+    assert result.ok is True
+    assert result.data["scrcpy"] == "/stub/late/scrcpy"
+
+
+def test_scrcpy_step_dry_run_never_probes_or_claims_a_version(tmp_path: Path) -> None:
+    runner = RecordingRunner()
+    context = make_context(tmp_path, runner=runner, options=InstallOptions(dry_run=True))
+
+    result = ScrcpyStep().run(context)
+
+    assert result.ok is True
+    assert result.data["planned"] is True
+    assert result.data["version"] == ""
+    assert all(record.dry_run for record in runner.records)
+    assert "--version" not in " ".join(" ".join(record.argv) for record in runner.records)
+
+
 # ---------------------------------------------------------------------------
 # Acceleration steps
 # ---------------------------------------------------------------------------

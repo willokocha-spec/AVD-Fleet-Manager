@@ -540,6 +540,9 @@ def test_build_argv_wipe_and_proxy() -> None:
         proxy_upstream="http://127.0.0.1:7900",
     )
     assert "-wipe-data" in argv
+    # A wipe must also disable snapshot restore: a quickboot snapshot from an
+    # earlier boot still holds the provisioned userdata and would undo the wipe.
+    assert "-no-snapshot" in argv
     assert argv[argv.index("-http-proxy") + 1] == "http://127.0.0.1:7900"
 
 
@@ -680,11 +683,61 @@ def test_start_port_uniqueness(harness: RuntimeHarness) -> None:
     assert harness.allocator.capacity()["in_use"] == 2
 
 
-def test_start_without_image_rejected(harness: RuntimeHarness) -> None:
+def test_start_without_image_rejected(
+    harness: RuntimeHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No image id, no template and no config.ini image path => reject."""
+    monkeypatch.setattr(
+        RuntimeManagerService, "_derive_image_id", staticmethod(lambda info: "")
+    )
     info = harness.add()
-    harness.avds.instances[info.name] = info.model_copy(update={"image_id": None, "template_id": None})
+    harness.avds.instances[info.name] = info.model_copy(
+        update={"image_id": None, "template_id": None}
+    )
     with pytest.raises(ValidationError):
         harness.start()
+
+
+def test_start_adopted_avd_derives_image_from_config(
+    harness: RuntimeHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An AVD created by ``avdmanager`` is startable via its config.ini image path.
+
+    Adopted AVDs have no ``image_id`` and no template row, so ``start`` used to
+    reject them with "has no system image" even though the image was installed.
+    The id is now derived from ``image.sysdir.1`` (the SDK package path).
+    """
+    monkeypatch.setattr(
+        RuntimeManagerService,
+        "_derive_image_id",
+        staticmethod(lambda info: "system-images;android-34;google_apis;x86_64"),
+    )
+    info = harness.add()
+    harness.avds.instances[info.name] = info.model_copy(
+        update={"image_id": None, "template_id": None}
+    )
+    started = harness.start()
+    assert started.ports is not None
+
+
+def test_derive_image_id_normalises_sysdir() -> None:
+    info = AvdInfo(
+        name="adopted",
+        config={"image.sysdir.1": "system-images\\android-34\\google_apis\\x86_64\\"},
+    )
+    assert RuntimeManagerService._derive_image_id(info) == (
+        "system-images;android-34;google_apis;x86_64"
+    )
+
+
+def test_derive_image_id_rejects_non_system_image_paths() -> None:
+    assert RuntimeManagerService._derive_image_id(AvdInfo(name="x")) == ""
+    assert (
+        RuntimeManagerService._derive_image_id(
+            AvdInfo(name="x", config={"image.sysdir.1": "some\\other\\place"})
+        )
+        == ""
+    )
 
 
 def test_start_unknown_instance(harness: RuntimeHarness) -> None:
