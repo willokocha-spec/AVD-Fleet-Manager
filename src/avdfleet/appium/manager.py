@@ -693,7 +693,10 @@ class AppiumManager:
 
     @staticmethod
     def _default_http_client() -> Any:
-        return httpx.Client(timeout=httpx.Timeout(2.0))
+        # Loopback Appium probes must not be routed through an HTTP proxy from
+        # the environment; trust_env=False also avoids proxy autodetection on
+        # macOS CI runners.
+        return httpx.Client(timeout=httpx.Timeout(2.0), trust_env=False)
 
     # ------------------------------------------------------------------
     # Internals: misc

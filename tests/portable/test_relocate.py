@@ -290,14 +290,15 @@ def _build_moved_bundle(tmp_path: Path, source_tree_with_venv: Path) -> tuple[Pa
     PortableBundleBuilder(source_root=source_tree_with_venv, python_version="3.12.14").build(dest)
     old_root = str(dest.resolve())
     old_style = old_root.replace("/", "\\") if HOST_OS == "windows" else old_root
+    sep = "\\" if HOST_OS == "windows" else "/"
 
-    make_file(dest / "avd" / "Pixel.ini", f"[AVD]\npath={old_style}\\avd\\Pixel.avd\npath.rel=avd/Pixel.avd\n")
+    make_file(dest / "avd" / "Pixel.ini", f"[AVD]\npath={old_style}{sep}avd{sep}Pixel.avd\npath.rel=avd/Pixel.avd\n")
     make_file(
         dest / "avd" / "Pixel.avd" / "config.ini",
-        f"image.sysdir.1={old_style}\\sdk\\system-images\\android-34\\google_apis\\x86_64/\n"
-        f"skin.path={old_style}\\skins\\pixel_7\n"
-        f"snapshot.path={old_style}\\avd\\Pixel.avd\\snapshots\\default_boot\n"
-        f"disk.dataPartition.path={old_style}\\avd\\Pixel.avd\\userdata-qemu.img\n",
+        f"image.sysdir.1={old_style}{sep}sdk{sep}system-images{sep}android-34{sep}google_apis{sep}x86_64/\n"
+        f"skin.path={old_style}{sep}skins{sep}pixel_7\n"
+        f"snapshot.path={old_style}{sep}avd{sep}Pixel.avd{sep}snapshots{sep}default_boot\n"
+        f"disk.dataPartition.path={old_style}{sep}avd{sep}Pixel.avd{sep}userdata-qemu.img\n",
     )
     make_file(
         dest / "avd" / "Pixel.avd" / "snapshots" / "default_boot" / "snapshot.pb",

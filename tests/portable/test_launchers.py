@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -634,7 +635,8 @@ def test_run_launcher_relocates_moved_bundle(tmp_path: Path) -> None:
     populate_runtime_dirs(root)
     old_root = str(tmp_path / "old-place")
     write_marker(root, recorded_root=old_root)
-    make_file(root / "avd" / "Pixel.ini", f"[AVD]\npath={old_root}\\avd\\Pixel.avd\n")
+    sep = "\\" if os.name == "nt" else "/"
+    make_file(root / "avd" / "Pixel.ini", f"[AVD]\npath={old_root}{sep}avd{sep}Pixel.avd\n")
     code, recorder = run_with(root)
     assert code == 0
     ini = (root / "avd" / "Pixel.ini").read_text(encoding="utf-8")

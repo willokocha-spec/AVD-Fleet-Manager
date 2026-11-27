@@ -143,7 +143,10 @@ def appium_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
         kwargs.setdefault("executable_resolver", lambda: [PYTHON, str(script)])
         kwargs.setdefault("readiness_timeout_s", 15.0)
         kwargs.setdefault("poll_interval_s", 0.1)
-        kwargs.setdefault("http_client_factory", lambda: httpx.Client(timeout=httpx.Timeout(2.0)))
+        kwargs.setdefault(
+            "http_client_factory",
+            lambda: httpx.Client(timeout=httpx.Timeout(2.0), trust_env=False),
+        )
         return AppiumManager(**kwargs)
 
     return SimpleNamespace(

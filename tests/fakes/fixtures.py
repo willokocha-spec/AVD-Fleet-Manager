@@ -64,7 +64,11 @@ def fake_tools(tmp_path_factory: pytest.TempPathFactory) -> Iterator[FakeTools]:
     """Session-scoped factory that builds the shims once and seeds state."""
     # A space in the root deliberately exercises path quoting on every shim.
     root = tmp_path_factory.mktemp("avdfleet fakes")
-    tools = build_fake_tools(root)
+    # The fake catalogue deliberately simulates a deterministic x86_64 device
+    # lab even on an ARM64 CI runner: system images, product names and ABI
+    # assertions are written for that catalogue.  Host-architecture behaviour
+    # is covered separately with synthetic HostInfo in the doctor tests.
+    tools = build_fake_tools(root, arch="x86_64")
     try:
         yield tools
     finally:
