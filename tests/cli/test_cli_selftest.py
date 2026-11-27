@@ -316,6 +316,28 @@ def test_cleanup_keeps_non_selftest_avd_artifacts(env) -> None:
     assert lookalike.is_dir()
 
 
+def test_cleanup_scans_the_avd_service_home(env) -> None:
+    """The SDK backend can resolve a different AVD home than ``paths.avd_home``.
+
+    On a stock install the AVD service uses ``~/.android/avd`` while the CLI
+    paths object points at the AVD Fleet data directory; cleanup must scan the
+    service's effective home too or the real orphan survives.
+    """
+    service_home = env.tmp_path / "sdk-avd-home"
+    service_home.mkdir()
+    orphan_dir = service_home / "selftest-02.avd"
+    orphan_dir.mkdir()
+    orphan_ini = service_home / "selftest-02.ini"
+    orphan_ini.write_text("path=selftest-02.avd\n", encoding="utf-8")
+    env.service("avds").avd_home = service_home
+
+    result, payload = invoke_json(["selftest", "--fakes"])
+    assert result.exit_code == 0, output_text(result)
+    assert not orphan_dir.exists()
+    assert not orphan_ini.exists()
+    assert not [note for note in payload["notes"] if note.startswith("cleanup problems:")]
+
+
 def test_cleanup_failure_is_reported_in_notes(env, monkeypatch) -> None:
     """A failed artifact removal is reported in ``notes``, never swallowed."""
     from avdfleet.cli.commands.selftest import SelftestRunner

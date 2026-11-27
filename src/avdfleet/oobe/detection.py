@@ -66,7 +66,11 @@ PROVISIONING_TOKENS: tuple[str, ...] = (
     "fallbackhome",
     "com.android.provision",
     "provisionactivity",
-    "googlesdksetup",
+    # Emulator SDK-setup stubs.  Two distinct packages have been observed on
+    # real boots: com.google.android.googlesdksetup (API 34) and
+    # com.google.android.sdksetup (API 25).  Match the common suffix so both are
+    # covered and any future variant is classified instead of reported unknown.
+    "sdksetup",
 )
 """Tokens identifying the unprovisioned first-boot state.
 

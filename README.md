@@ -22,13 +22,16 @@ AVD Fleet (`avdfleet`) turns a powerful workstation into a repeatable Android de
 ## Project status (read this first)
 
 The engine, API, CLI, GUI and portable bundler are implemented and covered by
-fakes-backed unit, contract, API, integration, portable, CLI and UI tests. **This
-repository's build host has no usable hypervisor** (no WHPX/KVM/HVF, 16 GB RAM),
-so **no real emulator was booted** during development: OOBE-matrix, proxy
-gate (G1), Appium and custom-image boot evidence are **blocked**, not passed.
-The item-by-item truth is in [docs/acceptance.md](docs/acceptance.md); the
-final build report is in [FINAL_REPORT.md](FINAL_REPORT.md). Real-emulator acceptance
-must be produced by `avdfleet selftest --e2e` on an accelerated host.
+fakes-backed unit, contract, API, integration, portable, CLI and UI tests. A
+first real-emulator acceptance pass has been produced on a WHPX host (Windows
+11): real AVDs boot and OOBE, script fan-out and the fleet dry run were
+exercised against them - see
+[docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md). The
+original build host had no usable hypervisor, so the proxy gate (G1), real
+Appium sessions and custom-image boot are still **unverified**, not passed. The
+item-by-item truth is in [docs/acceptance.md](docs/acceptance.md); the final
+build report is in [FINAL_REPORT.md](FINAL_REPORT.md). Re-run
+`avdfleet selftest --e2e` on an accelerated host to reproduce.
 
 ## Quick start (installed edition)
 
@@ -88,6 +91,7 @@ relocation, preflight checks and the documented leftovers.
 | Testing and contributing | [docs/testing.md](docs/testing.md) |
 | Troubleshooting matrix | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Acceptance evidence (honest status) | [docs/acceptance.md](docs/acceptance.md) |
+| Live acceptance on an accelerated host (2026-11-27) | [docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md) |
 | Architecture | [docs/architecture.md](docs/architecture.md) |
 | Security model | [docs/security.md](docs/security.md) |
 | Bootstrap scripts | [bootstrap/README.md](bootstrap/README.md) |

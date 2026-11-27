@@ -36,7 +36,7 @@ from avdfleet.oobe import (
     is_png,
     repair_shell_png,
 )
-from avdfleet.oobe.detection import ActivityKind, classify_top_activity
+from avdfleet.oobe.detection import ActivityKind, TopActivity, classify_top_activity
 from avdfleet.oobe.reset import PACKAGE_CLEANUP_COMMANDS, ResetEngine
 
 SETUP_WIZARD_ACTIVITY = "com.google.android.setupwizard/.SetupWizardActivity"
@@ -442,6 +442,24 @@ def test_extract_top_activity_unknown() -> None:
     assert classify_top_activity(top) is ActivityKind.UNKNOWN
 
 
+@pytest.mark.parametrize(
+    "activity",
+    [
+        # Observed on real boots of stock emulator images, which ship no Setup
+        # Wizard: the framework parks on a blank HOME until self-provisioning.
+        "com.android.settings/.FallbackHome",
+        "com.google.android.googlesdksetup/.DefaultActivity",
+        "com.google.android.sdksetup/.DefaultActivity",
+        "com.android.provision/.DefaultActivity",
+    ],
+)
+def test_classify_unprovisioned_first_boot_states(activity: str) -> None:
+    """First-boot stubs are ``provisioning``, never ``unknown``."""
+    package, _, cls = activity.partition("/")
+    top = TopActivity(activity=activity, package=package, component=f"{package}.{cls.lstrip('.')}")
+    assert classify_top_activity(top) is ActivityKind.PROVISIONING
+
+
 def test_extract_top_activity_falls_back_to_window_focus() -> None:
     top = extract_top_activity(DUMPSYS_ACTIVITY_EMPTY, DUMPSYS_WINDOW_FOCUS_ONLY)
     assert top.activity == SETUP_WIZARD_ACTIVITY
@@ -650,6 +668,27 @@ def test_verify_image_launcher_records_failed_and_still_cleans_up(tmp_path: Path
     assert record.activity == LAUNCHER_ACTIVITY
     assert harness.avds.deleted
     assert harness.catalog.updates and harness.catalog.updates[0].status is OobeStatus.FAILED
+
+
+def test_launcher_on_an_image_without_a_wizard_is_unsupported(tmp_path: Path) -> None:
+    """An image that ships no Setup Wizard boots to the launcher: unsupported.
+
+    Stock modern emulator images have no wizard at all, so seeing the launcher on
+    a pristine AVD says nothing about setup state.  Probing the guest's package
+    list distinguishes that from "this AVD was already provisioned".
+    """
+    shell = detection_shell(DUMPSYS_ACTIVITY_LAUNCHER, DUMPSYS_WINDOW_LAUNCHER)
+    shell["pm list packages -u"] = RunResult(
+        0, "package:com.google.android.sdksetup\npackage:com.google.android.partnersetup\n"
+    )
+    harness = OobeHarness(tmp_path, shell=shell)
+
+    record = harness.manager.verify_image(IMAGE_ID)
+
+    assert record.status is OobeStatus.UNSUPPORTED
+    assert record.activity == LAUNCHER_ACTIVITY
+    assert "no Setup Wizard" in record.notes
+    assert harness.catalog.updates and harness.catalog.updates[0].status is OobeStatus.UNSUPPORTED
 
 
 def test_verify_image_screenshot_failure_is_not_verified(tmp_path: Path) -> None:

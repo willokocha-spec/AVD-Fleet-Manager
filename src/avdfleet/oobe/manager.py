@@ -459,6 +459,33 @@ class OobeManager:
         return None
 
     # -- detection internals --------------------------------------------
+    def _wizard_installed(self, serial: str) -> bool | None:
+        """Whether the guest lists a Setup Wizard package; ``None`` when unknown.
+
+        This separates "the image ships no wizard" (a pristine AVD of such an
+        image boots to the launcher) from "this AVD was already set up".  The
+        former is a property of the image and must be reported as unsupported
+        rather than as a failed verification.
+        """
+        detector = self._detector
+        shell = getattr(detector, "shell", None)
+        if not callable(shell) or not serial:
+            return None
+        try:
+            result = shell(serial, "pm", "list", "packages", "-u")
+        except Exception:  # noqa: BLE001 - a probe failure means "unknown"
+            return None
+        if not bool(getattr(result, "ok", False)):
+            return None
+        text_fn = getattr(result, "text", None)
+        try:
+            text = str(text_fn() if callable(text_fn) else getattr(result, "stdout", "") or "")
+        except Exception:  # noqa: BLE001 - undecodable output means "unknown"
+            return None
+        if not text.strip():
+            return None
+        return "setupwizard" in text.lower()
+
     def _detection_record(
         self,
         avd_name: str,
@@ -499,10 +526,22 @@ class OobeManager:
                 " use the 'wipe' or 'snapshot' reset strategy"
             )
         elif detection.kind.value == "launcher":
-            notes = (
-                f"launcher visible ({detection.activity or 'unknown'});"
-                " first-run setup appears to be complete"
-            )
+            wizard_installed = self._wizard_installed(serial)
+            if wizard_installed is False:
+                # A pristine AVD of an image with no Setup Wizard boots straight
+                # to the launcher.  That is a property of the image, not a failed
+                # verification and not "already set up".
+                status = OobeStatus.UNSUPPORTED
+                notes = (
+                    "image ships no Setup Wizard (the guest lists no setupwizard package),"
+                    " so it boots straight to the launcher and has no OOBE to verify:"
+                    f" {detection.activity or 'launcher'}"
+                )
+            else:
+                notes = (
+                    f"launcher visible ({detection.activity or 'unknown'});"
+                    " first-run setup appears to be complete"
+                )
         elif detection.activity:
             notes = f"neither the setup wizard nor a launcher is in the foreground: {detection.activity}"
         else:

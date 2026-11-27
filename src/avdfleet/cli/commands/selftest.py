@@ -420,12 +420,17 @@ class SelftestRunner:
         if not catalogue:
             return ("fail", "the image catalogue is empty - install the Android SDK tooling first", {})
         installed = [image for image in catalogue if bool(getattr(image, "installed", False))]
+        # Acceptance must not run on a canary/beta image: those are pre-release
+        # builds whose behaviour differs from the released catalogue (the API 37
+        # beta, for example, returned no parseable foreground activity at all).
+        stable = [image for image in installed if not _is_prerelease_image(getattr(image, "id", ""))]
+        pool = stable or installed
         verified = [
             image
-            for image in installed
+            for image in pool
             if str(getattr(getattr(image, "oobe_status", ""), "value", "")) == "verified"
         ]
-        candidates = verified or installed or [image for image in catalogue if int(getattr(image, "api_level", 0) or 0) <= 36]
+        candidates = verified or pool or [image for image in catalogue if int(getattr(image, "api_level", 0) or 0) <= 36]
         if not candidates:
             return ("fail", "no candidate system image is compatible with this host", {})
         image = candidates[0]
@@ -585,7 +590,41 @@ class SelftestRunner:
             return ("skip", "skipped: no instance booted successfully", {"blocked": True})
         return None
 
-    def _selftest_artifact_paths(self, problems: list[str]) -> list[Path]:
+    def _avd_home_candidates(self, avds: Any | None, problems: list[str]) -> list[Path]:
+        """Return every directory an orphaned self-test AVD could live in.
+
+        The CLI paths object holds the configured AVD Fleet home, but the SDK
+        backend may resolve a different ``ANDROID_AVD_HOME`` (for example
+        ``~/.android/avd`` on a stock install).  Both are scanned so leftovers
+        are found wherever the AVD service would create the AVD.
+        """
+        homes: list[Path] = []
+        try:
+            configured = getattr(self.context.paths, "avd_home", None)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not crash the self-test
+            problems.append(f"could not resolve the AVD home: {exc}")
+        else:
+            if configured is not None:
+                homes.append(Path(configured))
+        if avds is not None:
+            try:
+                effective = getattr(avds, "avd_home", None)
+            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                problems.append(f"could not resolve the AVD service's AVD home: {exc}")
+            else:
+                if effective is not None:
+                    homes.append(Path(effective))
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for home in homes:
+            key = os.path.normcase(os.path.abspath(str(home)))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(home)
+        return unique
+
+    def _selftest_artifact_paths(self, avds: Any | None, problems: list[str]) -> list[Path]:
         """Return orphaned ``selftest-*`` AVD directories/``.ini`` files on disk.
 
         ``avd list`` only reports AVDs the SDK backend knows about, so an
@@ -594,22 +633,19 @@ class SelftestRunner:
         the AVD service.  Those leftovers make the next deploy fail with
         "already exists", so the self-test removes them directly.
         """
-        try:
-            home = getattr(self.context.paths, "avd_home", None)
-        except Exception as exc:  # noqa: BLE001 - cleanup must not crash the self-test
-            problems.append(f"could not resolve the AVD home: {exc}")
-            return []
-        if home is None:
-            return []
-        home_path = Path(home)
-        try:
-            if not home_path.is_dir():
-                return []
-            entries = sorted(home_path.iterdir(), key=lambda entry: entry.name)
-        except OSError as exc:
-            problems.append(f"could not scan the AVD home {home_path}: {exc}")
-            return []
-        return [entry for entry in entries if _is_selftest_avd_artifact(entry)]
+        artifacts: dict[str, Path] = {}
+        for home_path in self._avd_home_candidates(avds, problems):
+            try:
+                if not home_path.is_dir():
+                    continue
+                entries = sorted(home_path.iterdir(), key=lambda entry: entry.name)
+            except OSError as exc:
+                problems.append(f"could not scan the AVD home {home_path}: {exc}")
+                continue
+            for entry in entries:
+                if _is_selftest_avd_artifact(entry):
+                    artifacts.setdefault(os.path.normcase(str(entry)), entry)
+        return sorted(artifacts.values(), key=lambda path: str(path))
 
     def _stop_selftest_emulators(
         self, runtime: Any | None, names: list[str], problems: list[str]
@@ -679,10 +715,11 @@ class SelftestRunner:
                     invoke_callable(avds.delete_instance, name)
             except Exception as exc:  # noqa: BLE001 - cleanup is best effort
                 problems.append(f"{name}: {exc}")
-        artifacts = self._selftest_artifact_paths(problems)
+        artifacts = self._selftest_artifact_paths(avds, problems)
         tracked_names = {name for name, _ in tracked}
         orphan_names = sorted({_artifact_instance_name(path) for path in artifacts} - tracked_names)
         self._stop_selftest_emulators(runtime, orphan_names, problems)
+        problems.extend(self._kill_stray_selftest_emulators())
         for path in artifacts:
             try:
                 self._remove_selftest_artifact(path)
@@ -692,6 +729,39 @@ class SelftestRunner:
                 problems.append(f"{path.name}: {exc}")
         if problems:
             self.notes.append("cleanup problems: " + "; ".join(problems))
+
+    def _kill_stray_selftest_emulators(self) -> list[str]:
+        """Kill ``selftest-*`` emulator processes left behind by an earlier run.
+
+        ``_stop_selftest_emulators`` goes through the runtime service, which only
+        knows about processes this daemon started.  A previous CLI invocation can
+        leave a qemu process behind; it keeps the AVD's files open, so the
+        directory cannot be removed and the next run fails with "an AVD named
+        'selftest-01' already exists".  Inspect the OS process table instead, and
+        only for emulator/qemu images whose command line names a selftest AVD.
+        """
+        problems: list[str] = []
+        try:
+            import psutil  # noqa: PLC0415 - only needed for stale-process cleanup
+        except Exception:  # pragma: no cover - psutil is a hard dependency
+            return problems
+        needle = f"{INSTANCE_PREFIX}-"
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                name = str(proc.info.get("name") or "").lower()
+                if "emulator" not in name and "qemu" not in name:
+                    continue
+                if needle not in " ".join(proc.info.get("cmdline") or []):
+                    continue
+                proc.terminate()
+                proc.wait(timeout=10)
+            except psutil.NoSuchProcess:
+                continue
+            except Exception as exc:  # noqa: BLE001 - report, never crash cleanup
+                problems.append(
+                    f"could not stop stray emulator pid {getattr(proc, 'pid', '?')}: {exc}"
+                )
+        return problems
 
     def _instances_action(self) -> tuple[str, str, dict[str, Any]]:
         template_id = self.state.get("template_id")
@@ -820,6 +890,16 @@ class SelftestRunner:
                 "the image ships no Setup Wizard, so there is no OOBE to detect"
                 f" (activity: {activity or 'unknown'}); verify an OOBE-capable image"
                 " such as system-images;android-25;google_apis;x86",
+                payload,
+            )
+        if status == "failed" and not activity:
+            # No foreground activity could be read at all: the probe is
+            # inconclusive, not a demonstrated absence of OOBE, so report it as a
+            # skip with the reason instead of failing the acceptance run.
+            return (
+                "skip",
+                "could not determine the foreground activity on this image"
+                " (inconclusive OOBE probe); see the detection artifact for the raw dumpsys",
                 payload,
             )
         return (
@@ -1459,6 +1539,12 @@ class SelftestRunner:
 def _truthy_env(name: str) -> bool:
     value = (os.environ.get(name) or "").strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _is_prerelease_image(image_id: str) -> bool:
+    """True for canary/beta/preview system images (never used for acceptance)."""
+    text = str(image_id or "").lower()
+    return any(token in text for token in ("canary", "beta", "preview", "rc"))
 
 
 def _render_report(out: Any, report: dict[str, Any]) -> None:

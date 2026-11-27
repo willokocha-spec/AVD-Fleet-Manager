@@ -117,13 +117,15 @@ emulator tests are never reported as passing by CI; they are best-effort jobs.
 
 ## On this build host
 
-This checkout's build host reports **no usable hypervisor** (no WHPX/KVM/HVF,
-16 GiB RAM, ~13.5 GiB free) and cannot install the SDK or boot an emulator.
-Everything here is fakes-backed. The current evidence status, including the last
-test-run numbers and the full-suite teardown timeout that was observed while
-these tests were still being written, is recorded honestly in
+The original build host reported **no usable hypervisor** (no WHPX/KVM/HVF,
+16 GiB RAM, ~13.5 GiB free) and could not install the SDK or boot an emulator, so
+its results were entirely fakes-backed. A subsequent WHPX Windows 11 host has
+now produced real-emulator evidence: real AVD boots, OOBE detection, script
+fan-out and the fleet dry run all ran against actual emulators - see
+[live-acceptance-2026-11-27.md](live-acceptance-2026-11-27.md). The evidence
+status, including the last test-run numbers, is recorded honestly in
 [acceptance.md](acceptance.md). Do not cite this repository's CI as proof of
-real-emulator behaviour.
+real-emulator behaviour: the `emulator`-marked tests are best-effort jobs there.
 
 ## Contributing
 

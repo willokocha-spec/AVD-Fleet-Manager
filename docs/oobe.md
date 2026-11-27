@@ -130,12 +130,28 @@ image verified:
 
 ## Current status on this build host
 
-**R3 (OOBE matrix) and the real-emulator reset timings are BLOCKED here.** This
-host has no usable hypervisor (`VirtualizationFirmwareEnabled=False`, no
-WHPX/KVM/HVF), only 16 GiB RAM and ~13.5 GiB free, and the build policy forbids
-installing the SDK or booting emulators. No image has been booted, so all
-matrix entries remain `unverified`/seed-only and no reset timing is a real
-measurement. The detection, matrix evidence enforcement and all four reset
-strategies are covered by fakes-backed unit tests. Real OOBE evidence must be
-produced by running the R3 protocol or `avdfleet selftest --e2e` on an
-accelerated host; see [acceptance.md](acceptance.md).
+Real OOBE evidence now exists for a WHPX Windows 11 host. The original build
+host had no usable hypervisor (`VirtualizationFirmwareEnabled=False`, no
+WHPX/KVM/HVF), so it produced no measurements and every matrix entry there
+stayed seed-only.
+
+Measured on 2026-11-27 on the accelerated host (see
+[live-acceptance-2026-11-27.md](live-acceptance-2026-11-27.md)):
+
+- `system-images;android-25;google_apis;x86` booted the real
+  `com.google.android.setupwizard/.SetupWizardActivity` once (45.5 s boot).
+  Repeat verification - including with `-wipe-data` and `-no-snapshot` - did
+  not reproduce it, so treat API 25 OOBE as single-shot on a freshly installed
+  image.
+- `system-images;android-33;google_apis;x86_64` and
+  `system-images;android-34;google_apis;x86_64` ship **no Setup Wizard**: a
+  pristine AVD parks on `com.android.settings/.FallbackHome` (or an emulator
+  `sdksetup` stub) and is reported `unsupported` after probing the guest's
+  package list.
+- The API 34 Play Store image lists no `setupwizard` package at all
+  (`pm list packages -u`), so it cannot show OOBE either.
+
+The first-boot states the detector recognises are `FallbackHome`, the
+`googlesdksetup`/`sdksetup` stubs, and a real Setup Wizard; only the last is
+OOBE. Reset timings on real AVDs are still not measured - run the R3 protocol or
+`avdfleet selftest --e2e` on an accelerated host.
