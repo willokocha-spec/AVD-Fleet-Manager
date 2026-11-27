@@ -1766,7 +1766,7 @@ def emulator(args: list[str]) -> int:
     grpc_port = options.get("grpc") or fake_runtime.grpc_port_for(console_port)
     boot_seconds = fake_runtime.boot_seconds()
     started_at = fake_runtime.now()
-    proxy = options.get("proxy")
+    proxy = options.get("proxy") or os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY")
     snapshot = options.get("snapshot")
     wipe_data = bool(options.get("wipe_data"))
     launch_options = {

@@ -100,9 +100,16 @@ def _probe_health(url: str, *, timeout_s: float = HEALTH_PROBE_TIMEOUT_S) -> boo
         return False
 
 
-def _build_daemon_app(context: Any) -> Any:
+def _build_daemon_app(
+    context: Any,
+    bind_host: str | None = None,
+    bind_port: int | None = None,
+) -> Any:
     """Build the FastAPI app for the daemon using the serve implementation."""
-    return serve_module.create_daemon_app(context.config, context.container(), context.paths)
+    config = context.config
+    if bind_host is not None and bind_port is not None:
+        config = serve_module.resolve_security_allowlists(config, bind_host, bind_port)
+    return serve_module.create_daemon_app(config, context.container(), context.paths)
 
 
 def _start_background_server(app: Any, *, host: str, port: int) -> _BackgroundServer:
@@ -248,7 +255,7 @@ def gui(
                     f"{bind_host} --port {bind_port} --allow-remote' and then run 'avdfleet gui'"
                 ),
             )
-        app = _build_daemon_app(context)
+        app = _build_daemon_app(context, bind_host, bind_port)
         server = _start_background_server(app, host=bind_host, port=bind_port)
         if not _wait_until_healthy(base_url, timeout_s=DAEMON_READY_TIMEOUT_S, server=server):
             detail = server.error_message()

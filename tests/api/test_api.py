@@ -444,8 +444,21 @@ class FakeBridge:
     def list_active(self) -> list[BridgeConfig]:
         return [BridgeConfig(instance="avd-01", listen_port=7801, upstream=PROXY.safe_url, mode="http")]
 
-    def ensure(self, instance: str, proxy: ProxyConfig, *, listen_port: int | None = None) -> BridgeConfig:
+    def ensure(
+        self,
+        instance: str,
+        proxy: ProxyConfig,
+        *,
+        listen_port: int | None = None,
+        local_auth_token: str | None = None,
+    ) -> BridgeConfig:
         return BridgeConfig(instance=instance, listen_port=listen_port or 7801)
+
+    def local_proxy_credentials(self, instance: str) -> tuple[str, str] | None:
+        return None
+
+    def local_proxy_url(self, instance: str) -> str | None:
+        return "http://avd-01:test-token@127.0.0.1:7801"
 
     def stop(self, instance: str) -> None:
         return None

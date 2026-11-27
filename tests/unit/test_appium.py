@@ -193,6 +193,18 @@ def _running_avd(name: str = "avd-01", *, serial: str = "emulator-5554") -> AvdI
 # ---------------------------------------------------------------------------
 
 
+def test_appium_environment_never_inherits_daemon_secrets(
+    appium_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AVDFLEET_TOKEN", "daemon-token")
+    monkeypatch.setenv("AVDFLEET_VAULT_PASSPHRASE", "vault-pass")
+    manager = appium_env.make_manager()
+    env = manager._process_env()
+    assert "AVDFLEET_TOKEN" not in env
+    assert "AVDFLEET_VAULT_PASSPHRASE" not in env
+    assert int(env["ADB_LOCAL_TRANSPORT_MAX_PORT"]) >= 5681
+
+
 def test_start_status_stop_lifecycle(appium_env: SimpleNamespace) -> None:
     manager = appium_env.make_manager()
     try:

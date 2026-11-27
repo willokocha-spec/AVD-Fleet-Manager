@@ -41,6 +41,23 @@ Google Play Integrity bypass or device-fingerprint spoofing.
   server or written to logs), is consumed on first redemption, and is exchanged for the
   token over loopback. The token is written to browser local storage and is never rendered
   or placed in the URL. Pass `--no-auto-auth` to skip this and use the Connect screen.
+- Remote binds are fail-closed: `--allow-remote` is required, authentication must remain
+  enabled, and `--host 0.0.0.0`/`::` additionally requires an explicit `--trusted-host`.
+  A concrete bind host and the actual port are added to the Host/Origin allowlists
+  automatically; `--trusted-origin` covers reverse-proxy hostnames. This closes the
+  DNS-rebinding gap without accepting every `Host` header.
+- Daemon secrets are removed from every child environment (`AVDFLEET_TOKEN`,
+  `AVDFLEET_VAULT_PASSPHRASE`, future `AVDFLEET_SECRET_*` names) before scripts, Appium,
+  the emulator, SDK tools or installer commands are spawned. User scripts receive only
+  their explicit `AVDFLEET_*` run variables, never the daemon's bearer token or vault
+  passphrase.
+- Each bridged AVD has a random per-instance loopback proxy password, passed to the
+  emulator through its `http_proxy` environment (not `argv`, so it does not appear in
+  `ps`/command-line logs). Another AVD or local process cannot reuse that listener.
+- `ADB_LOCAL_TRANSPORT_MAX_PORT` is raised so adb accepts all 64 emulator ports. adb
+  reads it only when its server starts; `avdfleet doctor --slow` fails if an existing
+  adb server was started with the default 16-emulator limit and gives the safe restart
+  instruction (`adb kill-server`).
 - Responses set `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
   `Referrer-Policy: no-referrer`. Stack traces are never returned.
 
@@ -62,12 +79,13 @@ Google Play Integrity bypass or device-fingerprint spoofing.
   (filter), every API error body, and every persisted run result. Tests scan logs and
   responses for known test secrets.
 - Subprocess argv must not contain proxy passwords. The emulator receives a loopback
-  bridge URL (no upstream credentials) rather than the upstream userinfo; where direct
-  `-http-proxy` is used, the credential is transient and the process command line is
-  treated as readable by the local user (documented limitation and avoided in strict
-  mode).
+  bridge URL with a random per-instance listener password through `http_proxy` (never
+  `-http-proxy`), so neither the upstream credential nor the listener credential appears
+  in the process command line. Direct `-http-proxy` remains only for credential-free
+  upstreams; authenticated direct proxies are refused.
 - Run output is redacted before persistence/streaming; hooks receive environment
   variables only via explicit script definitions, not the daemon's environment.
+  `core.childenv` sanitizes every child-process environment at the spawn boundary.
 
 ## Installs and elevated actions
 

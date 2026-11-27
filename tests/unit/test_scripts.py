@@ -213,6 +213,34 @@ def _wait_for(predicate, *, timeout: float = 15.0) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def test_script_environment_never_inherits_daemon_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AVDFLEET_TOKEN", "daemon-token")
+    monkeypatch.setenv("AVDFLEET_VAULT_PASSPHRASE", "vault-pass")
+    service = _service(tmp_path)
+    try:
+        script = service.save_script(
+            ScriptDefinition(
+                id="env-check",
+                name="Environment check",
+                type=ScriptType.HOST_PYTHON,
+                content=(
+                    "import os\n"
+                    "print(os.environ.get('AVDFLEET_TOKEN', 'absent'))\n"
+                    "print(os.environ.get('AVDFLEET_VAULT_PASSPHRASE', 'absent'))\n"
+                    "print(os.environ.get('ADB_LOCAL_TRANSPORT_MAX_PORT', 'absent'))\n"
+                ),
+            )
+        )
+        run = service.run(ScriptRunRequest(script_id=script.id, instances=["avd-01"]))
+        assert run.state is RunState.SUCCEEDED
+        assert run.results[0].stdout.splitlines()[:2] == ["absent", "absent"]
+        assert int(run.results[0].stdout.splitlines()[2]) >= 5681
+    finally:
+        service.close()
+
+
 def test_builtin_library_is_loaded_with_stable_ids(tmp_path: Path) -> None:
     service = _service(tmp_path)
     try:

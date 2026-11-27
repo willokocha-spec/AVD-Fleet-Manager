@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from avdfleet.core.childenv import child_environment
+
 from ..base import (
     CUSTOM_HARDWARE_REPLY,
     DEFAULT_TIMEOUT_S,
@@ -55,7 +57,7 @@ class AvdManager:
             [str(arg) for arg in args],
             stdin=stdin,
             timeout_s=self.timeout_s if timeout_s is None else float(timeout_s),
-            env=self._environ or None,
+            env=child_environment(self._environ),
         )
 
     def version(self, *, timeout_s: float = VERSION_TIMEOUT_S) -> str:

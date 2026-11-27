@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -39,6 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from avdfleet.core.childenv import child_environment, sanitize_child_environment
 from avdfleet.core.config import Config
 from avdfleet.core.errors import (
     AvdFleetError,
@@ -489,8 +491,8 @@ class RuntimeManagerService:
                 hint="Install the emulator SDK package or repair the SDK.",
             ) from exc
 
-    def _launch_env(self) -> dict[str, str]:
-        env = dict(os.environ)
+    def _launch_env(self, proxy_url: str | None = None) -> dict[str, str]:
+        env = child_environment()
         if self.backend is not None:
             try:
                 env.update({str(k): str(v) for k, v in (self.backend.environment() or {}).items()})
@@ -499,6 +501,12 @@ class RuntimeManagerService:
         home = self._avd_home()
         if home is not None:
             env.setdefault("ANDROID_AVD_HOME", str(home))
+        env = sanitize_child_environment(env)
+        if proxy_url:
+            # Android's emulator reads http_proxy when -http-proxy is absent.
+            # The bridge listener requires this per-instance credential; keep it
+            # in the environment so it never appears in `ps` argument lists.
+            env["http_proxy"] = proxy_url
         return env
 
     # ------------------------------------------------------------------
@@ -795,13 +803,30 @@ class RuntimeManagerService:
 
     def _proxy_upstream(
         self, name: str, proxy: ProxyConfig | None
-    ) -> tuple[str | None, BridgeConfig | None]:
-        """Return a credential-free ``-http-proxy`` upstream and bridge config."""
+    ) -> tuple[str | None, BridgeConfig | None, str | None]:
+        """Return ``(argv_upstream, bridge_config, http_proxy_env_url)``.
+
+        The bridge listener is authenticated with a random per-instance token.
+        The token is passed to the emulator through ``http_proxy`` (never argv)
+        and is deliberately not stored in ``BridgeConfig`` or persisted state.
+        """
         if proxy is None:
-            return None, None
+            return None, None, None
         if self._bridge is not None:
             try:
-                ensured = self._bridge.ensure(name, proxy)
+                existing = self._bridge.local_proxy_credentials(name)
+            except Exception:  # pragma: no cover - defensive bridge failure
+                existing = None
+            if existing is not None:
+                token = existing[1]
+            else:
+                token = secrets.token_urlsafe(32)
+                # Force a fresh listener if a bridge for this instance existed
+                # without local authentication; an unauthenticated bridge must
+                # not survive an upgrade.
+                self._bridge.stop(name)
+            try:
+                ensured = self._bridge.ensure(name, proxy, local_auth_token=token)
             except AvdFleetError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -815,15 +840,20 @@ class RuntimeManagerService:
                 bridge_config = BridgeConfig.model_validate(dict(ensured))
             else:
                 raise ValidationError(f"proxy bridge returned an unsupported value: {ensured!r}")
-            upstream = f"http://{bridge_config.listen_host}:{int(bridge_config.listen_port)}"
-            return upstream, bridge_config
+            listener_url = self._bridge.local_proxy_url(name)
+            if not listener_url:
+                raise InstanceError(
+                    f"the local proxy bridge for {name!r} did not expose an HTTP listener",
+                    hint="Check the proxy bridge logs and retry.",
+                )
+            return None, bridge_config, listener_url
         if self.direct_proxy_enabled:
             if proxy.has_credentials:
                 raise InstanceError(
                     "direct emulator proxying cannot carry proxy credentials",
                     hint="Enable the local proxy bridge for authenticated proxies.",
                 )
-            return f"{proxy.scheme.value}://{proxy.host}:{proxy.port}", None
+            return f"{proxy.scheme.value}://{proxy.host}:{proxy.port}", None, None
         raise InstanceError(
             "a proxy was requested but no proxy bridge is configured",
             hint="Wire the local proxy bridge, or explicitly enable direct proxying "
@@ -914,7 +944,7 @@ class RuntimeManagerService:
             ram_mb = self._resolve_ram_mb(base_info, template)
             requested_proxy = proxy_id or (template.proxy_id if template else None) or base_info.proxy_id
             proxy = self._resolve_proxy(requested_proxy)
-            upstream, bridge_config = self._proxy_upstream(candidate, proxy)
+            upstream, bridge_config, proxy_env_url = self._proxy_upstream(candidate, proxy)
             decision = self._capacity.ensure_can_start(ram_mb)
             previous_ports = (
                 record.ports
@@ -927,7 +957,7 @@ class RuntimeManagerService:
                     self._emulator_executable(),
                     candidate,
                     ports,
-                    env=self._launch_env(),
+                    env=self._launch_env(proxy_env_url),
                     cwd=self._avd_home(),
                     log_path=launch_log_path(self.paths, candidate),
                     headless=resolved_headless,

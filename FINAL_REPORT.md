@@ -187,6 +187,31 @@ in [BRIEF_ORIGINAL.md](BRIEF_ORIGINAL.md). Known deviations:
   emulator E2E remains unvalidated.
 - **Python 3.14** is the host default and unsupported; all runs used bundled 3.12.14.
 
+### Post-review hardening (security/ops pass)
+
+A second security review identified five issues; all were fixed with tests and are
+documented in [docs/security.md](docs/security.md):
+
+- **Per-instance proxy isolation.** The runtime bridge now receives a random per-instance
+  listener password and passes it to the emulator through `http_proxy`, never through
+  `-http-proxy`/argv. A guest or local process cannot reuse another instance's bridge.
+- **Child environments.** `core/childenv.py` strips `AVDFLEET_TOKEN`,
+  `AVDFLEET_VAULT_PASSPHRASE` and reserved `AVDFLEET_SECRET_*` names at every spawn
+  boundary (scripts, Appium, emulator, SDK tools, installer, screen/OOBE helpers).
+- **Remote bind guard.** `serve` refuses a non-loopback bind when authentication is
+  disabled, and the warning now reflects the effective auth state.
+- **Remote Host/Origin allowlists.** Concrete bind addresses and the actual port are
+  added to Host/Origin validation automatically; wildcard binds require an explicit
+  `--trusted-host`; `--trusted-origin` covers reverse proxies. This also fixes the
+  WebSocket origin on custom loopback ports.
+- **ADB >16 instances.** `ADB_LOCAL_TRANSPORT_MAX_PORT` is set from the configured port
+  range at CLI/container startup and in every child environment. `doctor --slow` now
+  checks an already-running adb server and reports the required `adb kill-server` restart.
+
+Real-emulator confirmation of the bridge's `http_proxy` credential handling and a
+17-instance adb run remain hardware-gated and are called out in
+[docs/acceptance.md](docs/acceptance.md).
+
 ## 6. Known limitations
 
 - No real-emulator validation on this host: G1, R3 OOBE matrix, real Appium sessions,
@@ -275,14 +300,14 @@ leftovers and the Google-licence constraint.
 |---|---|---|
 | Lint | `python -m ruff check src tests bootstrap` | **PASS** |
 | Types | `python -m mypy` | **PASS** — no issues in 182 source files |
-| Python suite | `python -m pytest tests/unit tests/api tests/contract tests/integration tests/portable tests/cli tests/fakes bootstrap/test_bootstrap.py tests/e2e --timeout=180 -q` | **PASS** — 1342 passed, 5 skipped, 0 failed (167 s; skips include the real-emulator test) |
-| CLI | `python -m pytest tests/cli -q` | **PASS** — 111 passed |
+| Python suite | `python -m pytest tests/unit tests/api tests/contract tests/integration tests/portable tests/cli tests/fakes bootstrap/test_bootstrap.py tests/e2e --timeout=180 -q` | **PASS** — 1361 passed, 5 skipped, 0 failed (some skips include the real-emulator test) |
+| CLI | `python -m pytest tests/cli -q` | **PASS** — 116 passed |
 | Fakes | `python -m pytest tests/fakes -q` | **PASS** — 68 tests (included above) |
 | UI | `pnpm --dir ui test -- --run` | **PASS** — 11 files / 68 tests |
 | UI gates | `pnpm --dir ui typecheck`, `lint`, `build` | **PASS** |
 | Browser auto-login | headless Edge against a live daemon: one-time link → localStorage token → dashboard | **PASS** — redirected to `/`, dashboard rendered, code replay returned 401 |
 | Screenshots | `python scripts/screenshots.py` | **PASS** — 12 pages |
-| Wheel/sdist | `python scripts/build_release.py --no-sdist`; `python -m build --sdist` | **PASS** — 198-entry wheel (0.8 MiB) with UI + schemas; sdist with docs/screenshots |
+| Wheel/sdist | `python scripts/build_release.py --no-sdist`; `python -m build --sdist` | **PASS** — 199-entry wheel (0.8 MiB) with UI + schemas; sdist with docs/screenshots |
 | Portable bundles | `PortableBundleBuilder` on prepared x64/ARM64 trees | **PASS** — x64 and ARM64 ZIPs built and verified; ARM64 launcher, GUI, authenticated API and relocation verified end-to-end |
 | Source archive | `dist/avdfleet-0.1.0-source.zip` | **PASS** — 396-file GitHub-ready tree, no secrets/runtime state |
 | Bootstrap | `python -m pytest bootstrap/test_bootstrap.py -q` | **PASS** — 37 passed, 1 skipped (no bash) |

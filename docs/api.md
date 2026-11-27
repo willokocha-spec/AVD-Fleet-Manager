@@ -36,11 +36,14 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/api/v1/system
 - Missing/invalid token → `401` with `WWW-Authenticate: Bearer realm="avdfleet"`
   and the error envelope. A token is never echoed or logged.
 - Comparison is constant-time (SHA-256 + `hmac.compare_digest`).
-- CORS is an explicit origin allowlist (`api_host`/`allow_origins` config);
-  `TrustedHostMiddleware` limits Host headers; both default to loopback.
+- CORS is an explicit origin allowlist; `TrustedHostMiddleware` limits Host
+  headers. The actual bind host, port and loopback aliases are added automatically; for a
+  wildcard bind (`0.0.0.0`/`::`) an explicit `--trusted-host` is required, and
+  `--trusted-origin` is available for reverse proxies.
 - The server binds `127.0.0.1` by default. Changing `api_host` to a non-loopback
-  address is an explicit opt-in and is not recommended: any local API caller who
-  has the token has full control of the emulator fleet.
+  address requires `avdfleet serve --allow-remote`, keeps bearer authentication enabled,
+  and is not recommended: any caller who has the token has full control of the fleet.
+  Remote serving with `auth_required = false` is refused.
 
 See [security.md](security.md) for the full security model.
 

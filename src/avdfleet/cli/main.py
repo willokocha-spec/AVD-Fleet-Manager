@@ -145,6 +145,12 @@ def main(argv: Sequence[str] | None = None, *, container: Any | None = None) -> 
     the equivalent environment route is AVDFLEET_CONTAINER=module:factory.
     """
     configure_stdio()
+    # adb only reads its local-transport limit when the server starts.  Set it
+    # in the CLI process before any command can spawn adb (and therefore before
+    # a server it may start inherits the environment).
+    from avdfleet.core.childenv import ensure_process_adb_environment  # noqa: PLC0415
+
+    ensure_process_adb_environment()
     args = list(sys.argv[1:] if argv is None else argv)
     command = typer.main.get_command(app)
     context: CliContext | None = CliContext(container=container) if container is not None else None

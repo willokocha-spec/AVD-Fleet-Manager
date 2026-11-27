@@ -335,6 +335,52 @@ def test_admin_warnings_and_sudo_detection(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_adb_transport_ok_when_no_server_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doctor, _config, _paths = _doctor(tmp_path)
+    monkeypatch.setattr(doctor_module, "find_adb_server", lambda: None)
+    check = doctor._run_check("adb_transport", doctor._context(include_slow=True))
+    assert check.status is CheckStatus.OK
+
+
+def test_adb_transport_fails_for_a_legacy_running_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doctor, _config, _paths = _doctor(tmp_path)
+    monkeypatch.setattr(
+        doctor_module,
+        "find_adb_server",
+        lambda: (1234, {"ADB_LOCAL_TRANSPORT_MAX_PORT": "5585"}),
+    )
+    check = doctor._run_check("adb_transport", doctor._context(include_slow=True))
+    assert check.status is CheckStatus.FAIL
+    assert "instances 17+" in check.detail
+    assert "adb kill-server" in (check.hint or "")
+
+
+def test_adb_transport_accepts_a_configured_running_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doctor, _config, _paths = _doctor(tmp_path)
+    monkeypatch.setattr(
+        doctor_module,
+        "find_adb_server",
+        lambda: (1234, {"ADB_LOCAL_TRANSPORT_MAX_PORT": "5681"}),
+    )
+    check = doctor._run_check("adb_transport", doctor._context(include_slow=True))
+    assert check.status is CheckStatus.OK
+
+
+def test_adb_transport_warns_when_server_environment_is_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    doctor, _config, _paths = _doctor(tmp_path)
+    monkeypatch.setattr(doctor_module, "find_adb_server", lambda: (1234, None))
+    check = doctor._run_check("adb_transport", doctor._context(include_slow=True))
+    assert check.status is CheckStatus.WARN
+
+
 def test_hypervisor_failure_is_fixable_with_platform_command(tmp_path: Path) -> None:
     windows_doctor, _config, _paths = _doctor(tmp_path, host=_unavailable_host())
     report = windows_doctor.run()

@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..core.childenv import child_environment
 from ..core.errors import ScreenError
 from ..core.logging import get_logger
 from ..core.models import OperationResult
@@ -152,7 +153,9 @@ class ScrcpyLauncher:
             process = (
                 spawner(argv)
                 if spawner is not None
-                else subprocess.Popen(argv, close_fds=True)  # noqa: S603 - injected/validated argv
+                else subprocess.Popen(  # noqa: S603 - injected/validated argv
+                    argv, close_fds=True, env=child_environment()
+                )
             )
         except Exception as exc:  # noqa: BLE001 - report as operation failure
             return OperationResult(ok=False, message=f"failed to launch scrcpy: {exc}", data={"argv": argv})

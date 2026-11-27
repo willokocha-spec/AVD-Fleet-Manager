@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from avdfleet.core.childenv import child_environment
+
 from ..base import (
     INSTALL_TIMEOUT_S,
     LICENSE_PROMPT_REPLY,
@@ -68,7 +70,7 @@ class SdkManager:
             self.argv_for(*args)[1:],
             stdin=stdin,
             timeout_s=self.timeout_s if timeout_s is None else float(timeout_s),
-            env=self._environ or None,
+            env=child_environment(self._environ),
         )
 
     # -- commands -------------------------------------------------------

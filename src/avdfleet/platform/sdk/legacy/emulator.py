@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from avdfleet.core.childenv import child_environment
 from avdfleet.core.models import GpuMode
 
 from ..base import DEFAULT_TIMEOUT_S, Runner, ToolResult, require_ok, run_tool
@@ -48,7 +49,7 @@ class Emulator:
             [str(arg) for arg in args],
             stdin=None,
             timeout_s=self.timeout_s if timeout_s is None else float(timeout_s),
-            env=self._environ or None,
+            env=child_environment(self._environ),
         )
 
     # -- queries --------------------------------------------------------
@@ -147,7 +148,7 @@ class Emulator:
                 stdout=stdout,
                 stderr=subprocess.STDOUT,
                 cwd=str(cwd) if cwd is not None else None,
-                env=dict(self._environ) or None,
+                env=child_environment(self._environ),
             )
         finally:
             if log_handle is not None:

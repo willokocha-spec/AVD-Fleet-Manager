@@ -42,8 +42,8 @@ Legend: **REAL** = real emulator/host evidence; **FAKES** = process-boundary fak
 |---|---|---|
 | Ruff | `python -m ruff check src tests bootstrap` | **PASS** (all checks passed) |
 | Mypy | `python -m mypy` | **PASS** - no issues in 182 source files |
-| Python suite | `python -m pytest tests/unit tests/api tests/contract tests/integration tests/portable tests/cli tests/fakes bootstrap/test_bootstrap.py tests/e2e --timeout=180 -q` | **PASS** - **1342 passed, 5 skipped, 0 failed** in 167 s (skips include the real-emulator test) |
-| CLI suite | `python -m pytest tests/cli -q` | **PASS** - 111 passed (includes one-time browser sign-in tests) |
+| Python suite | `python -m pytest tests/unit tests/api tests/contract tests/integration tests/portable tests/cli tests/fakes bootstrap/test_bootstrap.py tests/e2e --timeout=180 -q` | **PASS** - **1361 passed, 5 skipped, 0 failed** (skips include the real-emulator test) |
+| CLI suite | `python -m pytest tests/cli -q` | **PASS** - 116 passed (includes one-time browser sign-in and hardening tests) |
 | Fakes suite | `python -m pytest tests/fakes -q` | **PASS** - 68 tests (included in the 1332) |
 | UI tests | `pnpm --dir ui test -- --run` | **PASS** - 11 files, 68 tests |
 | UI typecheck/lint/build | `pnpm --dir ui typecheck`, `lint`, `build` | **PASS** (tsc, eslint max-warnings 0, Vite 335 modules) |

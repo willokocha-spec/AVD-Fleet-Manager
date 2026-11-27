@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from .core.childenv import ensure_process_adb_environment
 from .core.config import APP_VERSION, Config
 from .core.events import EventBus
 from .core.paths import Paths
@@ -32,6 +33,7 @@ class Container:
     def __init__(self, config: Config, paths: Paths) -> None:
         self.config = config
         self.paths = paths
+        ensure_process_adb_environment(port_end=config.port_range_end)
         self.paths.ensure()
         self.event_bus = EventBus()
         self._closed = False

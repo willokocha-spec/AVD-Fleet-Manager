@@ -58,8 +58,21 @@ See [installer.md](installer.md).
 
 | Command | Purpose |
 |---|---|
-| `serve` | Run the REST + WebSocket + GUI daemon; `--host`, `--port`, `--no-open`, `--portable`, `--allow-remote`, `--tls-cert FILE`, `--tls-key FILE`. |
+| `serve` | Run the REST + WebSocket + GUI daemon; `--host`, `--port`, `--no-open`, `--portable`, `--allow-remote`, `--tls-cert FILE`, `--tls-key FILE`, `--trusted-host HOST` (repeatable), `--trusted-origin ORIGIN` (repeatable). |
 | `gui` | Start the daemon if needed and open the web GUI; `--host`, `--port`, `--no-browser`, `--no-auto-auth`, `--json`. By default it opens a one-time sign-in link that stores the daemon token in browser local storage, so no copy/paste is needed; the token is never printed or placed in the URL. |
+
+Remote serving is fail-closed:
+
+- `--allow-remote` is required for any non-loopback bind, and the daemon refuses to
+  start remotely when `auth_required = false` (use an SSH tunnel or an authenticating
+  reverse proxy for unauthenticated lab setups).
+- A concrete `--host` address is trusted automatically for Host-header validation and
+  added to the WebSocket/CORS origin allowlist for that exact scheme and port.
+- `--host 0.0.0.0` / `::` requires at least one explicit `--trusted-host` (otherwise
+  every Host header would be accepted). Add `--trusted-origin` when the browser
+  reaches the GUI through a reverse proxy or different hostname.
+- The loopback aliases and the actual `--port` are added automatically on every bind,
+  so a custom port no longer breaks the GUI WebSocket origin check.
 
 ### Images and OOBE
 

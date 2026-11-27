@@ -72,7 +72,7 @@ def _arm_started_daemon(
     """Patch gui's seams for the "no daemon yet" path; return the recorders."""
     fake_server = server if server is not None else _FakeServer()
     monkeypatch.setattr(gui_module, "_probe_health", lambda url, timeout_s=1.0: False)
-    monkeypatch.setattr(gui_module, "_build_daemon_app", lambda context: "fake-app")
+    monkeypatch.setattr(gui_module, "_build_daemon_app", lambda context, *args, **kwargs: "fake-app")
     starter = _Recorder(result=fake_server)
     monkeypatch.setattr(gui_module, "_start_background_server", starter)
     monkeypatch.setattr(

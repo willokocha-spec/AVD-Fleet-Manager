@@ -332,10 +332,20 @@ class FakeBridge:
     def __init__(self) -> None:
         self.ensured: list[tuple[str, str, int]] = []
         self.stopped: list[str] = []
+        self.tokens: dict[str, str] = {}
 
-    def ensure(self, instance: str, proxy: ProxyConfig, *, listen_port: int | None = None) -> BridgeConfig:
+    def ensure(
+        self,
+        instance: str,
+        proxy: ProxyConfig,
+        *,
+        listen_port: int | None = None,
+        local_auth_token: str | None = None,
+    ) -> BridgeConfig:
         port = 7900 + len(self.ensured)
         self.ensured.append((instance, proxy.id, port))
+        if local_auth_token is not None:
+            self.tokens[instance] = local_auth_token
         return BridgeConfig(
             instance=instance,
             listen_host="127.0.0.1",
@@ -344,8 +354,19 @@ class FakeBridge:
             mode="http",
         )
 
+    def local_proxy_credentials(self, instance: str) -> tuple[str, str] | None:
+        token = self.tokens.get(instance)
+        return (instance, token) if token else None
+
+    def local_proxy_url(self, instance: str) -> str | None:
+        token = self.tokens.get(instance)
+        if token is None:
+            return None
+        return f"http://{instance}:{token}@127.0.0.1:7900"
+
     def stop(self, instance: str) -> None:
         self.stopped.append(instance)
+        self.tokens.pop(instance, None)
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +697,11 @@ def test_start_unknown_instance(harness: RuntimeHarness) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_proxy_uses_bridge_and_never_leaks_credentials(harness: RuntimeHarness) -> None:
+def test_proxy_uses_bridge_and_never_leaks_credentials(
+    harness: RuntimeHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AVDFLEET_TOKEN", "daemon-token")
+    monkeypatch.setenv("AVDFLEET_VAULT_PASSPHRASE", "vault-pass")
     proxy = ProxyConfig(
         id="p1",
         scheme=ProxyScheme.HTTP,
@@ -694,12 +719,39 @@ def test_proxy_uses_bridge_and_never_leaks_credentials(harness: RuntimeHarness) 
     argv = " ".join(harness.factory.last["argv"])
     assert "hunter2" not in argv
     assert "alice" not in argv
-    assert argv.count("-http-proxy") == 1
-    assert "http://127.0.0.1:7900" in argv
+    assert "-http-proxy" not in argv
     assert bridge.ensured and bridge.ensured[0][:2] == ("avd-01", "p1")
+    token = bridge.tokens["avd-01"]
+    assert token
+    assert harness.factory.last["env"]["http_proxy"] == (
+        f"http://avd-01:{token}@127.0.0.1:7900"
+    )
+    assert token not in argv
+    assert "AVDFLEET_TOKEN" not in harness.factory.last["env"]
+    assert "AVDFLEET_VAULT_PASSPHRASE" not in harness.factory.last["env"]
+    assert int(harness.factory.last["env"]["ADB_LOCAL_TRANSPORT_MAX_PORT"]) >= 5681
     assert info.proxy_id == "p1"
     harness.runtime.stop("avd-01", force=True)
-    assert bridge.stopped == ["avd-01"]
+    assert bridge.stopped == ["avd-01", "avd-01"]
+
+
+def test_proxy_tokens_are_unique_per_instance(harness: RuntimeHarness) -> None:
+    proxy = ProxyConfig(id="p1", host="127.0.0.1", port=8081)
+    harness.proxy_pool = FakeProxyPool([proxy])
+    bridge = FakeBridge()
+    harness.runtime._proxy_pool = harness.proxy_pool
+    harness.runtime._bridge = bridge
+    harness.add("avd-01")
+    harness.add("avd-02")
+    harness.start("avd-01", proxy_id="p1")
+    first = bridge.tokens["avd-01"]
+    first_env = harness.factory.last["env"]["http_proxy"]
+    harness.start("avd-02", proxy_id="p1")
+    second = bridge.tokens["avd-02"]
+    second_env = harness.factory.last["env"]["http_proxy"]
+    assert first != second
+    assert first in first_env and second in second_env
+    assert "-http-proxy" not in harness.factory.last["argv"]
 
 
 def test_direct_proxy_with_credentials_refused(harness: RuntimeHarness) -> None:

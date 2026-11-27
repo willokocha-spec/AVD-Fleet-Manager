@@ -65,6 +65,76 @@ def display_url(bind_host: str, bind_port: int, *, tls: bool = False) -> str:
     return f"{scheme}://{display_host}:{bind_port}"
 
 
+def _url_host(host: str) -> str:
+    """Format a bind host for use in an Origin/URL (IPv6 needs brackets)."""
+    value = str(host).strip()
+    if value.startswith("[") and value.endswith("]"):
+        return value
+    if ":" in value:
+        return f"[{value}]"
+    return value
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = str(value).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def resolve_security_allowlists(
+    config: Config,
+    bind_host: str,
+    bind_port: int,
+    *,
+    tls: bool = False,
+    trusted_hosts: list[str] | None = None,
+    trusted_origins: list[str] | None = None,
+) -> Config:
+    """Return a config whose Host/Origin allowlists match the actual bind.
+
+    A concrete bind host is trusted automatically and gets its exact origin, so
+    ``--allow-remote`` works without a second manual allowlist.  Wildcard binds
+    cannot be trusted automatically (that would trust every Host header), so at
+    least one explicit non-loopback ``--trusted-host`` is required.  The same
+    derivation fixes loopback on a non-default port, where the browser Origin
+    otherwise never matched the defaults.
+    """
+    hosts = _dedupe([str(item) for item in (config.trusted_hosts or [])])
+    hosts.extend(str(item) for item in (trusted_hosts or []) if str(item).strip())
+    hosts = _dedupe(hosts)
+    origins = _dedupe([str(item) for item in (config.allow_origins or [])])
+    origins.extend(str(item) for item in (trusted_origins or []) if str(item).strip())
+
+    wildcard = bind_host in _WILDCARD_HOSTS
+    if wildcard:
+        explicit_non_loopback = [host for host in hosts if not is_loopback_host(host)]
+        if not explicit_non_loopback:
+            raise CliUsageError(
+                "refusing to bind to a wildcard address without an explicit trusted host",
+                hint="pass --trusted-host <name-or-ip> (repeatable) so Host-header "
+                "validation and the browser Origin allowlist are explicit",
+            )
+        origin_hosts = [*explicit_non_loopback]
+    else:
+        hosts.append(bind_host)
+        origin_hosts = [bind_host]
+        if is_loopback_host(bind_host):
+            origin_hosts.extend(["127.0.0.1", "localhost"])
+
+    scheme = "https" if tls else "http"
+    for host in origin_hosts:
+        if not host:
+            continue
+        origins.append(f"{scheme}://{_url_host(host)}:{bind_port}")
+    origins = _dedupe(origins)
+    return config.model_copy(update={"trusted_hosts": hosts, "allow_origins": origins})
+
+
 def _resolve_tls(tls_cert: Path | None, tls_key: Path | None) -> tuple[Path | None, Path | None]:
     """Validate the --tls-cert/--tls-key pair and return normalised paths."""
     if tls_cert is None and tls_key is None:
@@ -165,6 +235,16 @@ def serve(
     ),
     tls_cert: Path = typer.Option(None, "--tls-cert", help="TLS certificate (PEM) for HTTPS; requires --tls-key."),
     tls_key: Path = typer.Option(None, "--tls-key", help="TLS private key (PEM) for HTTPS; requires --tls-cert."),
+    trusted_host: list[str] = typer.Option(
+        None,
+        "--trusted-host",
+        help="Additional allowed Host header (repeatable). Required for --host 0.0.0.0/::.",
+    ),
+    trusted_origin: list[str] = typer.Option(
+        None,
+        "--trusted-origin",
+        help="Additional allowed browser Origin (repeatable), e.g. behind a reverse proxy.",
+    ),
     json_output: bool = json_flag(),
 ) -> None:
     """Run the AVD Fleet daemon serving the REST API, WebSocket and web GUI."""
@@ -184,12 +264,26 @@ def serve(
                 f"refusing to bind the daemon to the non-loopback address {bind_host}",
                 hint="pass --allow-remote to bind remotely (prefer --tls-cert/--tls-key and a firewall)",
             )
+        if not bool(getattr(config, "auth_required", True)):
+            raise CliUsageError(
+                "refusing to expose the daemon remotely with authentication disabled",
+                hint="enable auth_required, bind loopback and use an SSH tunnel, or put an "
+                "authenticating reverse proxy in front of the daemon",
+            )
         out.warning(
             f"binding the daemon to the non-loopback address {bind_host}; "
             "the bearer token is still required but the network may expose the API"
         )
         if cert is None:
             out.warning("traffic is not encrypted: pass --tls-cert/--tls-key for HTTPS on untrusted networks")
+    config = resolve_security_allowlists(
+        config,
+        bind_host,
+        bind_port,
+        tls=cert is not None,
+        trusted_hosts=trusted_host,
+        trusted_origins=trusted_origin,
+    )
 
     container = context.container()
     app = create_daemon_app(config, container, paths)
@@ -252,6 +346,7 @@ __all__ = [
     "is_loopback_host",
     "register",
     "resolve_binding",
+    "resolve_security_allowlists",
     "run_uvicorn",
     "serve",
 ]

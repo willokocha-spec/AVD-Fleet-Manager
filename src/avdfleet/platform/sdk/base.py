@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from avdfleet.core.childenv import child_environment
 from avdfleet.core.config import Config
 from avdfleet.core.errors import CommandError, ConfigError, ToolError
 from avdfleet.core.logging import get_logger, redact
@@ -1034,8 +1035,12 @@ class BaseSdkBackend:
         return build_environment(self.sdk_paths, base=self._environ)
 
     def process_env(self) -> dict[str, str]:
-        """Full subprocess environment (ambient environment + SDK variables)."""
-        return {**self._environ, **self.environment()}
+        """Full subprocess environment (ambient environment + SDK variables).
+
+        Daemon secrets are stripped and the adb transport limit is raised so
+        tools started here inherit the same safe environment as other children.
+        """
+        return child_environment({**self._environ, **self.environment()})
 
     def _run(
         self,

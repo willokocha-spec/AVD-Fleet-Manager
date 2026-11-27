@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from avdfleet.core.childenv import child_environment
 from avdfleet.core.config import Config
 from avdfleet.core.errors import CommandError, InstallerError
 from avdfleet.core.events import EventBus, EventType
@@ -145,10 +146,8 @@ class CommandRunner:
             self.records.clear()
 
     def environment(self, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-        env = dict(os.environ) if self._base_env is None else dict(self._base_env)
-        if extra:
-            env.update({str(key): str(value) for key, value in extra.items()})
-        return env
+        base = os.environ if self._base_env is None else self._base_env
+        return child_environment(base, extra=extra)
 
     # -- execution -------------------------------------------------------
     def run(

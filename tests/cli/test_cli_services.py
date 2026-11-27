@@ -577,7 +577,17 @@ def test_serve_remote_binding_requires_allow_remote(monkeypatch, env) -> None:
 def test_serve_remote_binding_warns_with_allow_remote(monkeypatch, env) -> None:
     recorded = _capture_uvicorn(monkeypatch)
     result, payload = invoke_json(
-        ["serve", "--host", "0.0.0.0", "--port", "8909", "--no-open", "--allow-remote"]
+        [
+            "serve",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8909",
+            "--no-open",
+            "--allow-remote",
+            "--trusted-host",
+            "192.0.2.10",
+        ]
     )
     assert result.exit_code == 0, output_text(result)
     text = output_text(result)
@@ -587,6 +597,75 @@ def test_serve_remote_binding_warns_with_allow_remote(monkeypatch, env) -> None:
     assert payload["remote"] is True
     # Wildcard binds still advertise the reachable loopback URL.
     assert payload["url"] == "http://127.0.0.1:8909"
+    assert "192.0.2.10" in payload["config"]["trusted_hosts"]
+    assert "http://192.0.2.10:8909" in payload["config"]["allow_origins"]
+
+
+def test_serve_wildcard_requires_an_explicit_trusted_host(monkeypatch, env) -> None:
+    recorded = _capture_uvicorn(monkeypatch)
+    result = invoke(["--json", "serve", "--host", "0.0.0.0", "--port", "8909", "--no-open", "--allow-remote"])
+    assert result.exit_code == 2, output_text(result)
+    assert recorded == {}
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "usage_error"
+    assert "trusted host" in payload["error"]["message"]
+
+
+def test_serve_auto_trusts_a_concrete_remote_ip(monkeypatch, env) -> None:
+    recorded = _capture_uvicorn(monkeypatch)
+    result, payload = invoke_json(
+        ["serve", "--host", "192.0.2.10", "--port", "8911", "--no-open", "--allow-remote"]
+    )
+    assert result.exit_code == 0, output_text(result)
+    assert recorded["kwargs"]["host"] == "192.0.2.10"
+    assert "192.0.2.10" in payload["config"]["trusted_hosts"]
+    assert "http://192.0.2.10:8911" in payload["config"]["allow_origins"]
+
+
+def test_serve_custom_loopback_port_updates_origin_allowlist(monkeypatch, env) -> None:
+    _capture_uvicorn(monkeypatch)
+    result, payload = invoke_json(["serve", "--port", "8912", "--no-open"])
+    assert result.exit_code == 0, output_text(result)
+    assert "http://127.0.0.1:8912" in payload["config"]["allow_origins"]
+    assert "http://localhost:8912" in payload["config"]["allow_origins"]
+
+
+def test_serve_explicit_trusted_origin_is_kept(monkeypatch, env) -> None:
+    _capture_uvicorn(monkeypatch)
+    result, payload = invoke_json(
+        [
+            "serve",
+            "--port",
+            "8914",
+            "--no-open",
+            "--trusted-origin",
+            "https://proxy.example.test",
+        ]
+    )
+    assert result.exit_code == 0, output_text(result)
+    assert "https://proxy.example.test" in payload["config"]["allow_origins"]
+
+
+def test_serve_refuses_remote_with_auth_disabled(monkeypatch, env) -> None:
+    recorded = _capture_uvicorn(monkeypatch)
+    result = invoke(
+        [
+            "--json",
+            "serve",
+            "--host",
+            "192.0.2.10",
+            "--port",
+            "8913",
+            "--no-open",
+            "--allow-remote",
+        ],
+        env={"AVDFLEET_AUTH_REQUIRED": "false"},
+    )
+    assert result.exit_code == 2, output_text(result)
+    assert recorded == {}
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "usage_error"
+    assert "authentication disabled" in payload["error"]["message"]
 
 
 def test_serve_loopback_does_not_warn(monkeypatch, env) -> None:

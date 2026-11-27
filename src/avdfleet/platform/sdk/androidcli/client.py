@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from avdfleet.core.childenv import child_environment
 from avdfleet.core.logging import redact
 
 from ..base import (
@@ -138,7 +139,7 @@ class AndroidCliClient:
             [str(arg) for arg in args],
             stdin=stdin,
             timeout_s=self.timeout_s if timeout_s is None else float(timeout_s),
-            env=self._environ or None,
+            env=child_environment(self._environ),
         )
 
     # -- sdk ------------------------------------------------------------

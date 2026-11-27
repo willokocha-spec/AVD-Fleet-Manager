@@ -37,6 +37,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from ..core.childenv import child_environment
 from ..core.errors import OobeError
 from ..core.logging import get_logger
 from ..core.models import utcnow
@@ -107,9 +108,7 @@ class SubprocessRunner:
         timeout_s: float = 30.0,
     ) -> None:
         self.executable = str(executable or argv0)
-        self._env: dict[str, str] | None = (
-            {str(key): str(value) for key, value in env.items()} if env is not None else None
-        )
+        self._env: dict[str, str] = child_environment(env)
         self._timeout_s = float(timeout_s)
 
     def run(self, argv: Sequence[str], timeout_s: float | None = None) -> subprocess.CompletedProcess[bytes]:

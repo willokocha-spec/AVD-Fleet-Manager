@@ -34,6 +34,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from ..core.childenv import child_environment, sanitize_child_environment
 from ..core.errors import ScriptError
 from ..core.models import ScriptDefinition, ScriptType
 from .types import InstanceTarget, PlannedCommand, ScriptContext
@@ -158,7 +159,7 @@ class CommandBuilder:
         context: ScriptContext,
         output_dir: Path,
     ) -> dict[str, str]:
-        env: dict[str, str] = dict(os.environ)
+        env: dict[str, str] = child_environment()
         env.update(self._base_env)
         adb = self.try_resolve_adb()
         env.update(
@@ -187,7 +188,7 @@ class CommandBuilder:
         env["AVDFLEET_UDID"] = target.serial
         env["AVDFLEET_OUTPUT_DIR"] = str(output_dir)
         env["AVDFLEET_WORK_DIR"] = str(output_dir)
-        return env
+        return sanitize_child_environment(env)
 
     def _appium_env(self, target: InstanceTarget) -> dict[str, str]:
         url = self._appium_url_resolver(target) if self._appium_url_resolver is not None else self._appium_url

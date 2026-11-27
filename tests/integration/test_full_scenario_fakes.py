@@ -137,7 +137,12 @@ def test_boot_oobe_bridge_script_and_stop(live_container) -> None:
     assert argv, "fake emulator should have been launched"
     flattened = " ".join(str(item) for entry in argv for item in entry)
     assert "supersecret" not in flattened
-    assert "-http-proxy" in flattened
+    assert "-http-proxy" not in flattened
+    launch_options = fake_state.read()["avds"]["e2e-avd"]["launch_options"]
+    listener_url = str(launch_options.get("http_proxy") or "")
+    assert listener_url.startswith("http://e2e-avd:")
+    assert "@127.0.0.1:" in listener_url
+    assert "supersecret" not in listener_url
 
     stopped = c.runtime().stop("e2e-avd", force=True)
     assert stopped.state.value in {"stopped", "error"}

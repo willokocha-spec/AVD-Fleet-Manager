@@ -39,6 +39,11 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any
 
+from avdfleet.core.childenv import (
+    ADB_LOCAL_TRANSPORT_MAX_PORT_ENV,
+    DEFAULT_ADB_LOCAL_TRANSPORT_MAX_PORT,
+    child_environment,
+)
 from avdfleet.core.config import Config
 from avdfleet.core.models import (
     CheckStatus,
@@ -84,6 +89,7 @@ FAST_CHECK_IDS: tuple[str, ...] = (
 )
 SLOW_CHECK_IDS: tuple[str, ...] = (
     "adb",
+    "adb_transport",
     "emulator",
     "emulator_accel",
     "jdk",
@@ -112,6 +118,7 @@ _CHECK_TITLES: dict[str, str] = {
     "defender": "Windows Defender exclusions",
     "clock": "System clock",
     "adb": "adb available",
+    "adb_transport": "adb supports more than 16 emulators",
     "emulator": "Android emulator available",
     "emulator_accel": "Emulator acceleration usable",
     "jdk": "Java JDK available",
@@ -265,6 +272,37 @@ def hypervisor_fix_command(host: HostInfo) -> str:
 # ---------------------------------------------------------------------------
 
 
+def find_adb_server() -> tuple[int, dict[str, str] | None] | None:
+    """Return ``(pid, environment)`` for a running adb server, if any.
+
+    Environment inspection is best-effort: some platforms require elevated
+    permissions to read another process's environment.  Returning ``None`` for
+    the environment means "server exists but its environment is unreadable".
+    """
+    try:
+        import psutil  # noqa: PLC0415 - optional diagnostics dependency
+    except ImportError:  # pragma: no cover - psutil is a declared dependency
+        return None
+    for process in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = str(process.info.get("name") or "").lower()
+            if name not in {"adb", "adb.exe"}:
+                continue
+            command_line = " ".join(str(part) for part in (process.info.get("cmdline") or [])).lower()
+            if "fork-server" not in command_line and "server" not in command_line:
+                continue
+            try:
+                environment = {
+                    str(key): str(value) for key, value in (process.environ() or {}).items()
+                }
+            except (psutil.Error, OSError):
+                environment = None
+            return int(process.info["pid"]), environment
+        except (psutil.Error, OSError, KeyError, TypeError):
+            continue
+    return None
+
+
 @dataclass
 class _Context:
     host: HostInfo
@@ -405,12 +443,13 @@ class Doctor:
         host = self._resolve_host(refresh=False)
         config = self.config
         paths = self.paths
+        environ = child_environment(self._environ)
         return _Context(
             host=host,
             config=config,
             paths=paths,
-            sdk=sdk_paths(config, paths, environ=self._environ),
-            environ=dict(self._environ),
+            sdk=sdk_paths(config, paths, environ=environ),
+            environ=environ,
             include_slow=include_slow,
         )
 
@@ -1004,6 +1043,55 @@ class Doctor:
             "adb",
             CheckStatus.WARN,
             detail=f"adb ran but its version could not be parsed: {_short(stdout or stderr)}",
+        )
+
+    def _check_adb_transport(self, ctx: _Context) -> DoctorCheck:
+        required = DEFAULT_ADB_LOCAL_TRANSPORT_MAX_PORT
+        server = find_adb_server()
+        if server is None:
+            return self._make(
+                "adb_transport",
+                CheckStatus.OK,
+                detail=(
+                    f"No adb server is running; {ADB_LOCAL_TRANSPORT_MAX_PORT_ENV}={required} "
+                    "will be applied when AVD Fleet starts one (supports 64 emulators)."
+                ),
+            )
+        pid, environment = server
+        if environment is None:
+            return self._make(
+                "adb_transport",
+                CheckStatus.WARN,
+                detail=f"An adb server (pid {pid}) is running but its environment is unreadable.",
+                hint=(
+                    "Restart adb from an AVD Fleet shell: `adb kill-server`, then start an "
+                    "instance. Ensure ADB_LOCAL_TRANSPORT_MAX_PORT is at least "
+                    f"{required}."
+                ),
+            )
+        raw = environment.get(ADB_LOCAL_TRANSPORT_MAX_PORT_ENV)
+        try:
+            limit = int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        if limit is not None and limit >= required:
+            return self._make(
+                "adb_transport",
+                CheckStatus.OK,
+                detail=f"adb server (pid {pid}) local transport limit is {limit}.",
+            )
+        return self._make(
+            "adb_transport",
+            CheckStatus.FAIL,
+            detail=(
+                f"adb server (pid {pid}) was started with "
+                f"{ADB_LOCAL_TRANSPORT_MAX_PORT_ENV}={raw or 'unset'}; instances 17+ "
+                f"will be invisible (need at least {required})."
+            ),
+            hint=(
+                "Run `adb kill-server`, then start the fleet again so the server inherits "
+                f"ADB_LOCAL_TRANSPORT_MAX_PORT={required}. This disconnects other adb clients."
+            ),
         )
 
     def _check_emulator(self, ctx: _Context) -> DoctorCheck:

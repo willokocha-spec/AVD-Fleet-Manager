@@ -33,6 +33,7 @@ from typing import Any
 
 import httpx
 
+from ..core.childenv import child_environment, sanitize_child_environment
 from ..core.config import Config
 from ..core.errors import AppiumError, NotFoundError
 from ..core.events import EventBus, EventSink, EventType
@@ -415,14 +416,14 @@ class AppiumManager:
         return (found,) if found else None
 
     def _process_env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        env = child_environment()
         if self._config.is_portable:
             appium_home = self._paths_obj().tools_dir / "appium-home"
             with contextlib.suppress(OSError):
                 appium_home.mkdir(parents=True, exist_ok=True)
             env.setdefault("APPIUM_HOME", str(appium_home))
         env.update(self._environment)
-        return env
+        return sanitize_child_environment(env)
 
     def _wait_ready(self, port: int, log_path: Path) -> str:
         deadline = self._clock() + self._readiness_timeout_s

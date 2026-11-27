@@ -13,6 +13,8 @@ import shlex
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from avdfleet.core.childenv import child_environment
+
 from ..base import (
     DEFAULT_TIMEOUT_S,
     Runner,
@@ -75,7 +77,7 @@ class Adb:
             argv,
             stdin=stdin,
             timeout_s=self.timeout_s if timeout_s is None else float(timeout_s),
-            env=self._environ or None,
+            env=child_environment(self._environ),
         )
 
     # -- server ---------------------------------------------------------

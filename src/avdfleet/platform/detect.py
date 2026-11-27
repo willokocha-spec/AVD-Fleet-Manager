@@ -45,6 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from avdfleet.core.childenv import child_environment
 from avdfleet.core.config import Config, platform_display_name
 from avdfleet.core.models import (
     AcceleratorInfo,
@@ -1266,8 +1267,8 @@ class PlatformDetector:
 
     def _subprocess_env(self) -> dict[str, str] | None:
         if not self._explicit_environ:
-            return None
-        return {**os.environ, **self._environ}
+            return child_environment()
+        return child_environment({**os.environ, **self._environ})
 
 
 def _coerce_result(result: Any) -> CommandResult:
