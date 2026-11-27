@@ -286,7 +286,8 @@ leftovers and the Google-licence constraint.
 
 ## 9. Links
 
-- Repository: local checkout `C:\Users\lab\Documents\Android` (no git remote configured)
+- Repository: <https://github.com/willokocha-spec/AVD-Fleet-Manager> (public, `main`;
+  published 2026-11-27 from this tree)
 - Working brief: [BRIEF.md](BRIEF.md) · supplied prompt part 1:
   [BRIEF_ORIGINAL.md](BRIEF_ORIGINAL.md) · decisions: [DECISIONS.md](DECISIONS.md) ·
   plan/agent ledger: [PLAN.md](PLAN.md)

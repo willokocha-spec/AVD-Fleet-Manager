@@ -2,6 +2,8 @@
 
 **Install, isolate and automate fleets of Android Virtual Devices — from a GUI, a CLI or an API.**
 
+Repository: <https://github.com/willokocha-spec/AVD-Fleet-Manager>
+
 AVD Fleet (`avdfleet`) turns a powerful workstation into a repeatable Android device lab:
 
 - one-command installer for the Android SDK, emulator, JDK, Node, Appium 4 and scrcpy
