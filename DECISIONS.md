@@ -110,3 +110,71 @@ two independent runs (G1a/G1b, R3a/R3b) on real hardware. Root also performed in
 edits after Wave 0 (frozen-core fixes, container wiring, lint/type fixes) rather than
 delegating every one, because the original Wave-0 rule was superseded by the need to
 unblock and converge a large parallel build.
+
+## D-016 — Root & instrumentation stays external and measures instead of assuming
+The Root & Instrumentation subsystem (service, SQLite v3 tables, REST under
+`/api/v1/instrumentation`, CLI `avdfleet instrumentation`, GUI page) keeps Magisk,
+rootAVD and LSPosed **outside** the distribution: all three are GPLv3, this project is
+MIT, and mixing GPL binaries into a shipped bundle would change that distribution's
+licensing. The module library therefore stores operator-imported artifacts with
+SHA-256 and provenance instead of fetching them; Magisk installation runs only through
+the operator's `AVDFLEET_MAGISK_INSTALLER` command template; Xposed activation and
+per-app scope stay a guided LSPosed-manager step because there is no supported
+unattended API. The capability model reports `adb root` and Magisk root separately,
+and installed/enabled/active separately, so the product cannot claim success for a
+file transfer or a pending reboot. The known gaps are documented rather than hidden:
+no device-side Xposed inventory, no automated Xposed activation, no signature
+verification, no run recovery, and LSPosed installation not yet exercised on a live
+instance ([docs/instrumentation.md](docs/instrumentation.md),
+[docs/instrumentation-compatibility.md](docs/instrumentation-compatibility.md)).
+
+## D-017 — Official-source acquisition instead of vendoring
+D-016's "store operator imports instead of fetching" is narrowed: the daemon may
+fetch a **pinned** Magisk 26.1 (`26100`) APK and LSPosed 1.9.2 (`7024`) ZIP from
+their official GitHub releases, because a download performed by the operator's own
+instance on the operator's host is not a redistribution. Nothing is vendored:
+there is no binary in the repository, wheel or portable bundle, and the pins are
+version + URL + size + SHA-256 compiled into `instrumentation/acquire.py` (hashes
+measured from the official assets on 2026-11-27). Acquisition requires explicit
+confirmation (`confirm: true` / `--confirm`; otherwise `409` naming the version and
+GPL-3.0), verifies size then hash (`422` and discard on mismatch), stores under
+`<data>/instrumentation/toolchain/<key>/<version>/`, and records provenance
+(version, hash, size, URL, licence, timestamp) in a shared `manifest.json`. A
+downloaded module ZIP is **imported into the module library**
+(`source: "official-release"`) rather than installed; consequently the built-in
+LSPosed profile resolves the newest `lsposed_zip` when its step has no module bound,
+while the kind-ambiguous `install_module` step still requires an explicit binding.
+Acquisition does not remove the hard parts: ramdisk patching, Magisk "Additional
+Setup", Zygisk and reboots remain separate operator steps. Xposed enable/scope
+gained best-effort profile steps that write LSPosed's own SQLite database
+(`enable_xposed_module`, `set_xposed_scope`), but that schema is not a public API;
+the LSPosed manager remains the authoritative interface and a reboot is still
+required. The download path and the LSPosed import were live-verified on
+2026-11-27; the Magisk APK path is implemented and unit/API-tested. See D-018 for
+the later API 34 verification of Magisk setup and LSPosed runtime, and for the
+Xposed enable/scope steps.
+
+## D-018 — Unattended Magisk setup, and LSPosed verified on API 34
+`complete_magisk_setup` automates the step that silently breaks every module
+workflow: install the acquired pinned Magisk APK, launch
+`com.topjohnwu.magisk/.ui.MainActivity`, tap the "Requires Additional Setup"
+dialogs located from `uiautomator dump` (no hard-coded coordinates), wait for the
+app's own reboot (≤300 s), then require a populated `/data/adb/magisk`. Measured on
+API 34: four unprompted taps. The three full-stack built-in profiles now run it
+between `install_magisk` and `enable_zygisk`. This is the one step that reboots an
+AVD as a side effect, so a deployment that includes it is not reboot-free. It is
+UI automation, not a protocol: a changed Magisk UI/locale can break it, and the
+failure path asks the operator to finish manually. The measured strings are
+`/data/adb is not present, abort` (magiskd) and `Incomplete Magisk install` (CLI);
+`/data/adb/magisk` existing means setup completed, not that Magisk is installed.
+
+The same API 34 run verified Zygisk and LSPosed 1.9.2 end-to-end: LSPosed active
+after reboot (`pidof lspd`, logcat companion/binder lines), with the manager
+installed separately from `/data/adb/modules/zygisk_lsposed/manager.apk` because
+`lspd` does not install it. Detection follows measurement: Zygisk active is
+`zygiskd` or a staged loader under `$(magisk --path)` (never `/sbin/.magisk` on
+API 34), LSPosed active is `pidof lspd`, and `pm list packages` is a false
+negative for activation. The Xposed inventory/scope and the two DB-write steps
+(`enable_xposed_module`, `set_xposed_scope`) are unit-tested and their package
+validation is the SQL injection boundary; the LSPosed database is WAL-mode, so a
+copy without `-wal`/`-shm` reads as empty, and the manager remains authoritative.

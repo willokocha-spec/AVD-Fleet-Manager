@@ -123,6 +123,7 @@ relocation, preflight checks and the documented leftovers.
 | Live acceptance on an accelerated host (2026-11-27) | [docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md) |
 | API 25 OOBE and the setup-wizard gate | [docs/oobe-api25.md](docs/oobe-api25.md) |
 | Rooted and writable emulator images | [docs/rooted-images.md](docs/rooted-images.md) |
+| Root and instrumentation (pinned acquisition, unattended Magisk setup, modules, deployment) | [docs/instrumentation.md](docs/instrumentation.md) |
 | Architecture | [docs/architecture.md](docs/architecture.md) |
 | Security model | [docs/security.md](docs/security.md) |
 | Bootstrap scripts | [bootstrap/README.md](bootstrap/README.md) |

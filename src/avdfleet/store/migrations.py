@@ -28,7 +28,7 @@ __all__ = [
     "ensure_schema",
 ]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Created before any migration runs.  ``version`` is the primary key so each
 #: migration is recorded at most once, even if two daemons race at startup.
@@ -229,10 +229,82 @@ _V2_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX idx_oobe_status ON oobe_records(status)",
 )
 
+# ---------------------------------------------------------------------------
+# v3 -- Root & Instrumentation: the central module library, reusable profiles
+#        and deployment runs with their logs.
+# ---------------------------------------------------------------------------
+
+_V3_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE instrumentation_modules (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'unknown',
+        name TEXT NOT NULL DEFAULT '',
+        package_name TEXT NOT NULL DEFAULT '',
+        version TEXT NOT NULL DEFAULT '',
+        version_code INTEGER NOT NULL DEFAULT 0,
+        min_sdk INTEGER NOT NULL DEFAULT 0,
+        abi TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        sha256 TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'upload',
+        source_url TEXT NOT NULL DEFAULT '',
+        file_path TEXT NOT NULL DEFAULT '',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX idx_instr_modules_sha ON instrumentation_modules(sha256)",
+    "CREATE INDEX idx_instr_modules_kind ON instrumentation_modules(kind)",
+    """
+    CREATE TABLE instrumentation_profiles (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        revision INTEGER NOT NULL DEFAULT 1,
+        steps TEXT NOT NULL DEFAULT '[]',
+        builtin INTEGER NOT NULL DEFAULT 0 CHECK (builtin IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX idx_instr_profiles_name ON instrumentation_profiles(name)",
+    """
+    CREATE TABLE instrumentation_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        profile_id TEXT NOT NULL DEFAULT '',
+        label TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL DEFAULT 'queued',
+        targets TEXT NOT NULL DEFAULT '[]',
+        results TEXT NOT NULL DEFAULT '[]',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+    )
+    """,
+    "CREATE INDEX idx_instr_runs_created ON instrumentation_runs(created_at DESC)",
+    "CREATE INDEX idx_instr_runs_state ON instrumentation_runs(state)",
+    """
+    CREATE TABLE instrumentation_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        instance TEXT NOT NULL DEFAULT '',
+        level TEXT NOT NULL DEFAULT 'info',
+        message TEXT NOT NULL,
+        at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX idx_instr_logs_run ON instrumentation_logs(run_id, id)",
+)
+
 
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="core schema", statements=_V1_STATEMENTS),
     Migration(version=2, name="runs and oobe records", statements=_V2_STATEMENTS),
+    Migration(version=3, name="root and instrumentation", statements=_V3_STATEMENTS),
 )
 
 

@@ -2,9 +2,9 @@
 
 The daemon exposes a REST API under `/api/v1` plus two WebSocket endpoints. The
 frozen OpenAPI 3.1 contract is checked in at
-[contracts/openapi.yaml](../contracts/openapi.yaml) (57 paths) and served by a
-running daemon at `/openapi.json`, with interactive docs at `/docs` (disable
-with `AVDFLEET_DOCS=0`).
+[contracts/openapi.yaml](../contracts/openapi.yaml) (71 paths, 89 operations) and
+served by a running daemon at `/openapi.json`, with interactive docs at `/docs`
+(disable with `AVDFLEET_DOCS=0`).
 
 - Default URL: `http://127.0.0.1:8765`
 - API prefix: `/api/v1`
@@ -143,6 +143,44 @@ See [security.md](security.md) for the full security model.
 | `POST /api/v1/appium/start` | Start (`{"port"}`) |
 | `POST /api/v1/appium/stop` | Stop |
 | `POST /api/v1/appium/capabilities` | UiAutomator2 capabilities (`{"avd_name"}`) |
+
+### Root and instrumentation
+
+| Method + path | Purpose |
+|---|---|
+| `GET /api/v1/instrumentation/capabilities?targets=` | Probe one or more AVDs (repeatable/comma-separated) |
+| `POST /api/v1/instrumentation/scan` | Probe with `{"targets": [...]}` |
+| `GET /api/v1/instrumentation/modules?kind=` | Module library (`kind` = `xposed_apk`, `magisk_zip`, `zygisk_zip`, `lsposed_zip`, `unknown`) |
+| `POST /api/v1/instrumentation/modules/import` | Multipart `file`, or JSON `{"path"}` / `{"url"}` |
+| `DELETE /api/v1/instrumentation/modules/{module_id}` | Remove a library record and its stored copy |
+| `GET /api/v1/instrumentation/toolchain` | Pinned artifacts, local presence/integrity, provenance manifest |
+| `POST /api/v1/instrumentation/toolchain/{key}/acquire` | Download/verify one pinned release (`{"confirm": true}`; `409` without it, `422` on a size/hash mismatch, `404` for an unknown key) |
+| `GET /api/v1/instrumentation/profiles` / `POST /api/v1/instrumentation/profiles` | List / create profiles |
+| `PUT/DELETE /api/v1/instrumentation/profiles/{profile_id}` | Update / delete a user profile |
+| `POST /api/v1/instrumentation/profiles/{profile_id}/clone` | Copy any profile into an editable one |
+| `POST /api/v1/instrumentation/deployments` | Deploy (`{"profile_id", "targets", "label", "background"}`) |
+| `GET /api/v1/instrumentation/deployments?limit=` | Recent deployments |
+| `GET /api/v1/instrumentation/deployments/{run_id}` | One run with per-target results |
+| `POST /api/v1/instrumentation/deployments/{run_id}/cancel` | Request cancellation |
+| `GET /api/v1/instrumentation/deployments/{run_id}/logs?limit=` | Run log |
+
+See [instrumentation.md](instrumentation.md) for the capability model, pinned
+versions and the deployment semantics. Two details are easy to miss:
+
+- A device snapshot's `xposed_modules[]` (read from LSPosed's own database)
+  includes `scope` — the application packages the module targets — and is empty
+  with an explanatory note when LSPosed, Magisk root or the device's `sqlite3` is
+  missing.
+- Profile steps accept every `StepAction`, including `complete_magisk_setup`
+  (installs the acquired Magisk APK, drives its "Additional Setup" and waits for
+  the app's own reboot — up to 300 s), and `enable_xposed_module` /
+  `set_xposed_scope`, which write LSPosed's internal database on the device and
+  require a reboot. The GUI profile editor offers all three; a profile created
+  through this API can use the same params.
+- LSPosed activation is checked with `pidof lspd`; the manager is not installed by
+  `lspd` and must be installed from
+  `/data/adb/modules/zygisk_lsposed/manager.apk` (see
+  [instrumentation.md](instrumentation.md#verifying-lsposed-is-running)).
 
 ### Fleet, portable and events
 

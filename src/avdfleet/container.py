@@ -116,6 +116,39 @@ class Container:
             ssl_verify=False,
         )
 
+        # -- root & instrumentation -------------------------------------
+        # The library stores operator-supplied artifacts; nothing here bundles
+        # or downloads Magisk/LSPosed (both GPL). aapt2 comes from the SDK's
+        # build-tools so APK metadata is read without an extra dependency.
+        from .instrumentation import (
+            AcquisitionStore,
+            InstrumentationRepository,
+            ModuleLibrary,
+            ensure_builtin_profiles,
+            find_aapt2,
+        )
+
+        self.instrumentation_repository = InstrumentationRepository(self.store.database)
+        self.instrumentation_modules_dir = (
+            Path(paths.data_dir or paths.root) / "instrumentation" / "modules"
+        )
+        self.instrumentation_modules_dir.mkdir(parents=True, exist_ok=True)
+        self.instrumentation_library = ModuleLibrary(
+            self.instrumentation_modules_dir,
+            aapt_path=find_aapt2(getattr(paths, "sdk_root", None)),
+        )
+        self.instrumentation_toolchain_dir = (
+            Path(paths.data_dir or paths.root) / "instrumentation" / "toolchain"
+        )
+        self.instrumentation_acquisition = AcquisitionStore(
+            self.instrumentation_toolchain_dir
+        )
+        try:
+            ensure_builtin_profiles(self.instrumentation_repository)
+        except Exception as exc:  # noqa: BLE001 - a broken seed must not block startup
+            logger.warning("could not seed built-in instrumentation profiles: %s", exc)
+        self._instrumentation_service: Any | None = None
+
         # -- AVDs / runtime ---------------------------------------------
         from .platform.avd import AvdManagerService
 
@@ -333,6 +366,51 @@ class Container:
     def verifier(self) -> Any:
         return self.verifier_service
 
+    @property
+    def instrumentation(self) -> Any:
+        """The Root & Instrumentation service (built lazily: it needs the runtime)."""
+        if self._instrumentation_service is None:
+            from .instrumentation import DeviceProber, InstrumentationService, TargetDevice
+
+            runtime = self.runtime()
+            images = self.images_service
+
+            def resolve(name: str) -> TargetDevice:
+                info = runtime.status(name)
+                serial = str(getattr(info, "adb_serial", "") or "")
+                ports = getattr(info, "ports", None)
+                if not serial and ports is not None:
+                    serial = f"emulator-{ports.console}"
+                values = getattr(info, "config", {}) or {}
+                image_id = str(getattr(info, "image_id", "") or "")
+                image_tag = ""
+                if image_id:
+                    try:
+                        image_tag = str(getattr(images.get_image(image_id), "tag", "") or "")
+                    except Exception:  # noqa: BLE001 - a missing catalogue row is fine
+                        image_tag = ""
+                return TargetDevice(
+                    instance=name,
+                    serial=serial,
+                    running=bool(getattr(getattr(info, "state", None), "active", False)),
+                    boot_completed=bool(getattr(info, "boot_completed", False)),
+                    image_id=image_id,
+                    image_tag=image_tag,
+                    api_level=0,
+                    abi=str(values.get("abi.type", "") or ""),
+                )
+
+            self._instrumentation_service = InstrumentationService(
+                self.instrumentation_repository,
+                self.instrumentation_library,
+                DeviceProber(str(self.adb_path) if self.adb_path else None),
+                resolve,
+                magisk_installer=_magisk_installer_from_environment(self),
+                acquisition=self.instrumentation_acquisition,
+                events=self.event_bus,
+            )
+        return self._instrumentation_service
+
     def scripts(self) -> Any:
         return self.script_service
 
@@ -461,6 +539,87 @@ def build_container(
     resolved_config = config or Config.load()
     resolved_paths = paths or resolved_config.resolved_paths()
     return Container(resolved_config, resolved_paths, detached_bridge=detached_bridge)
+
+
+def _magisk_installer_from_environment(container: Container) -> Any | None:
+    """Build an external Magisk installer from operator-supplied settings.
+
+    Magisk and rootAVD are GPL-licensed, so neither is bundled or downloaded.
+    When the operator points ``AVDFLEET_MAGISK_INSTALLER`` at their own toolchain
+    (``{instance}`` and ``{serial}`` are substituted) we run it; otherwise the
+    service raises a configuration error rather than pretending to install.
+
+    The command runs with the operator's privileges and can modify the image, so
+    it is only ever executed by an explicitly configured, explicitly requested
+    profile step.
+    """
+    import subprocess
+
+    from .core.childenv import child_environment
+    from .instrumentation import ComponentState, StepAction, StepResult
+
+    command = (os.environ.get("AVDFLEET_MAGISK_INSTALLER") or "").strip()
+    if not command:
+        return None
+
+    def installer(instance: str) -> StepResult:
+        info = container.runtime().status(instance)
+        serial = str(getattr(info, "adb_serial", "") or "")
+        # Built through the child-env sanitiser: the operator's installer must
+        # never inherit the daemon bearer token or the vault passphrase.
+        extra: dict[str, str] = {}
+        if serial:
+            extra["ANDROID_SERIAL"] = serial
+        sdk_root = getattr(container.paths, "sdk_root", None)
+        if sdk_root:
+            extra["ANDROID_HOME"] = str(sdk_root)
+            extra["ANDROID_SDK_ROOT"] = str(sdk_root)
+        # If the operator acquired the pinned Magisk release through this app, hand
+        # its verified path to the installer so the toolchain stays self-consistent.
+        if "AVDFLEET_MAGISK_APK" not in extra:
+            try:
+                from .instrumentation import find_artifact
+
+                status = container.instrumentation_acquisition.status(find_artifact("magisk"))
+                if status.present and status.verified:
+                    extra["AVDFLEET_MAGISK_APK"] = status.path
+            except Exception:  # noqa: BLE001 - acquisition is optional
+                pass
+        environment = child_environment(extra=extra)
+        argv = command.replace("{instance}", instance).replace("{serial}", serial)
+        try:
+            completed = subprocess.run(  # noqa: S602 - operator-supplied toolchain
+                argv,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                env=environment,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return StepResult(
+                step_id="install-magisk",
+                action=StepAction.INSTALL_MAGISK,
+                ok=False,
+                message=f"the configured Magisk installer could not run: {exc}",
+            )
+        output = (completed.stderr or completed.stdout or "").strip()
+        ok = completed.returncode == 0
+        return StepResult(
+            step_id="install-magisk",
+            action=StepAction.INSTALL_MAGISK,
+            ok=ok,
+            state=ComponentState.ENABLED if ok else ComponentState.ABSENT,
+            message=(
+                "external Magisk installer completed; reboot the AVD and run verify"
+                if ok
+                else output[-400:] or f"installer exited {completed.returncode}"
+            ),
+            data={"returncode": completed.returncode},
+        )
+
+    return installer
 
 
 __all__ = ["Container", "build_container"]

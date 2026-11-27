@@ -85,7 +85,7 @@ Remote serving is fail-closed:
 | `images refresh` | Refresh the remote catalogue (`--timeout`). |
 | `oobe matrix` | OOBE matrix (checked-in + local). |
 | `oobe verify IMAGE_ID` | Boot a temporary AVD and verify the Setup Wizard; `--timeout`, `--keep-avd`. |
-| `oobe reset AVD` | Reset an instance to OOBE; `--strategy snapshot|wipe|package|reboot`, `--verify/--no-verify`. |
+| `oobe reset AVD` | Reset an instance to OOBE; `--strategy snapshot\|wipe\|package\|reboot`, `--verify/--no-verify`. |
 
 See [oobe.md](oobe.md).
 
@@ -101,8 +101,8 @@ See [oobe.md](oobe.md).
 | `avd config NAME --set k=v [--unset k] [--dry-run]` | Typed `config.ini` edits. |
 | `avd export [-o FILE]` / `avd import FILE` | YAML fleet round-trip. |
 | `avd devices` | Device profiles known to the tooling. |
-| `avd templates list|create|delete` | Template CRUD (`create` options: `--name`, `--image`, `--id`, `--device`, `--ram`, `--heap`, `--cpu`, `--gpu`, `--headless/--windowed`, `--proxy`, `--description`, `--tag`). |
-| `instances list|get NAME` | Instance state. |
+| `avd templates list\|create\|delete` | Template CRUD (`create` options: `--name`, `--image`, `--id`, `--device`, `--ram`, `--heap`, `--cpu`, `--gpu`, `--headless/--windowed`, `--proxy`, `--description`, `--tag`). |
+| `instances list\|get NAME` | Instance state. |
 | `instances start NAME` | Start; `--proxy ID`, `--headless/--windowed`, `--dry-run`. |
 | `instances stop NAME` | Stop; `--force`, `--timeout`. |
 | `instances restart NAME` | Restart (`--proxy`). |
@@ -113,7 +113,7 @@ See [oobe.md](oobe.md).
 | `instances clone NAME --name NEW` | Clone. |
 | `instances delete NAME` | Delete (refuses while running; `--keep-files`). |
 | `instances capacity` | RAM/ports/CPU capacity report. |
-| `instances snapshots list|save|load|delete` | Snapshot management (`save … --golden`). |
+| `instances snapshots list\|save\|load\|delete` | Snapshot management (`save … --golden`). |
 
 ### Proxies
 
@@ -127,7 +127,7 @@ See [oobe.md](oobe.md).
 | `proxies delete ID` | Delete proxy and vaulted secret. |
 | `proxies verify ID` | Verify from the host; `-g/--guest AVD`, `--token-url`, `--timeout`. |
 | `proxies assign AVD ID` / `unassign AVD` | One proxy per instance. |
-| `proxies auto-assign` | Assign across instances (`--instances`, `--strategy round_robin|random|healthiest`). |
+| `proxies auto-assign` | Assign across instances (`--instances`, `--strategy round_robin\|random\|healthiest`). |
 | `proxies bridges` | Active local bridges. |
 
 See [proxy.md](proxy.md).
@@ -140,7 +140,7 @@ See [proxy.md](proxy.md).
 | `scripts create` | Create/update; `--name`, `--type`, `--content`, `--file`, `--description`, `--timeout`, `--id`. |
 | `scripts delete ID` | Delete a definition. |
 | `scripts run ID` | Fan-out run; `--instances`, `--concurrency`, `--timeout`, `--detach`, `--dry-run`. |
-| `scripts runs list|status|cancel` | Inspect/cancel runs (`--limit`). |
+| `scripts runs list\|status\|cancel` | Inspect/cancel runs (`--limit`). |
 
 See [scripting.md](scripting.md).
 
@@ -153,6 +153,30 @@ See [scripting.md](scripting.md).
 | `appium cleanup AVD` | Remove adb forwards/session state. |
 | `screen capture AVD [-o FILE]` | Capture one PNG (gRPC → adb → cache). |
 | `screen tap AVD X Y`, `swipe AVD X1 Y1 X2 Y2 [--duration]`, `text AVD TEXT`, `key AVD KEYCODE` | Input injection. |
+
+### Root and instrumentation
+
+| Command | Purpose |
+|---|---|
+| `instrumentation scan AVD [AVD ...]` | Probe root implementation, Magisk/Zygisk/LSPosed state, the Magisk module inventory, Xposed modules + scope (when LSPosed and `sqlite3` are present) and blockers; `--json`. |
+| `instrumentation modules list [--kind KIND]` | The central module library (Xposed APK / Magisk ZIP / Zygisk ZIP / LSPosed ZIP). |
+| `instrumentation modules import PATH` / `--url URL` | Import a package; SHA-256 dedupe returns a conflict for the same bytes. |
+| `instrumentation modules delete MODULE_ID` | Remove a library record and its stored copy. |
+| `instrumentation toolchain list` | Pinned Magisk 26.1 APK and LSPosed 1.9.2 ZIP: version, kind, downloaded/verified state, provenance manifest; `--json`. |
+| `instrumentation toolchain acquire magisk\|lsposed --confirm` | Download, size/SHA-256 verify and record one pinned release; the LSPosed ZIP is imported into the library. Without `--confirm` it refuses (the API returns `409`). |
+| `instrumentation profiles list` | Built-in and user profiles. |
+| `instrumentation profiles delete PROFILE_ID` | Delete a user profile (built-ins are protected). |
+| `instrumentation deploy PROFILE_ID --target AVD [...]` | Deploy to one or more AVDs; `--label`, `--wait/--no-wait`, `--json`. |
+| `instrumentation runs [--limit N]` | Recent deployments. |
+| `instrumentation logs RUN_ID` | Persisted lines for one deployment. |
+
+There is no CLI profile editor or clone command (the GUI's **Duplicate** action
+and `POST /api/v1/instrumentation/profiles/{id}/clone` cover copying). Xposed
+enable/scope can be expressed as the profile steps `enable_xposed_module` and
+`set_xposed_scope`; the LSPosed manager remains the supported interface. Built-in
+profiles now include `complete_magisk_setup`, so `instrumentation deploy` may
+install the Magisk APK and wait while the Magisk app reboots the AVD (up to 300 s)
+before continuing. See [instrumentation.md](instrumentation.md).
 
 ### Fleet, bundle and portable
 

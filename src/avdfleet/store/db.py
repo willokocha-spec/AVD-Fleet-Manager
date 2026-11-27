@@ -436,6 +436,11 @@ class Store:
         return self._db.path if self._db.path is not None else ":memory:"
 
     @property
+    def database(self) -> Database:
+        """The underlying :class:`Database`, for repositories owned elsewhere."""
+        return self._db
+
+    @property
     def is_memory(self) -> bool:
         return self._db.memory
 

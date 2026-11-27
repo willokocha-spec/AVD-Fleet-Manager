@@ -22,6 +22,7 @@ def register_commands(app: typer.Typer) -> None:
         images,
         install,
         instances,
+        instrumentation,
         proxies,
         screen,
         scripts,
@@ -40,6 +41,7 @@ def register_commands(app: typer.Typer) -> None:
     scripts.register(app)
     appium.register(app)
     screen.register(app)
+    instrumentation.register(app)
     fleet.register(app)
     bundle.register(app)
     selftest.register(app)

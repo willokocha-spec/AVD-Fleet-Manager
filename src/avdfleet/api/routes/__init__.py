@@ -10,7 +10,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from . import appium, events, fleet, images, instances, portable, proxies, scripts, system, templates
+from . import (
+    appium,
+    events,
+    fleet,
+    images,
+    instances,
+    instrumentation,
+    portable,
+    proxies,
+    scripts,
+    system,
+    templates,
+)
 
 #: Every REST router, in inclusion order (all are matched before the static
 #: SPA catch-all that ``create_app`` registers last).
@@ -23,6 +35,7 @@ ROUTERS: tuple[APIRouter, ...] = (
     proxies.router,
     scripts.router,
     appium.router,
+    instrumentation.router,
     fleet.router,
     portable.router,
     events.router,

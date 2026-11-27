@@ -30,6 +30,7 @@ class EventType:
     PROXY_CREATED = "proxy.created"
     PROXY_UPDATED = "proxy.updated"
     PROXY_CHECKED = "proxy.checked"
+    INSTRUMENTATION_RUN = "instrumentation.run"
     SCRIPT_RUN_STARTED = "script.run.started"
     SCRIPT_RUN_OUTPUT = "script.run.output"
     SCRIPT_RUN_FINISHED = "script.run.finished"
