@@ -283,10 +283,13 @@ def test_request_bootstrap_code_sends_bearer_and_returns_code() -> None:
         def do_POST(self):  # noqa: N802 - stdlib callback name
             seen["path"] = self.path
             seen["authorization"] = self.headers.get("Authorization")
+            body = b'{"code":"server-code","expires_in":120}'
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
             self.end_headers()
-            self.wfile.write(b'{"code":"server-code","expires_in":120}')
+            self.wfile.write(body)
 
         def log_message(self, *args):  # noqa: D401, ARG002 - silence test server
             return

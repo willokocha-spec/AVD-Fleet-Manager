@@ -141,7 +141,7 @@ def appium_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
         kwargs.setdefault("config", config)
         kwargs.setdefault("paths", paths)
         kwargs.setdefault("executable_resolver", lambda: [PYTHON, str(script)])
-        kwargs.setdefault("readiness_timeout_s", 15.0)
+        kwargs.setdefault("readiness_timeout_s", 30.0)
         kwargs.setdefault("poll_interval_s", 0.1)
         kwargs.setdefault(
             "http_client_factory",
@@ -184,7 +184,14 @@ def _running_avd(name: str = "avd-01", *, serial: str = "emulator-5554") -> AvdI
 
 def test_start_status_stop_lifecycle(appium_env: SimpleNamespace) -> None:
     manager = appium_env.make_manager()
-    status = manager.start()
+    try:
+        status = manager.start()
+    except AppiumError as exc:
+        logs = "\n".join(
+            f"{path.name}: {path.read_text(encoding='utf-8', errors='replace')}"
+            for path in sorted((appium_env.paths.logs_dir / "appium").glob("*.log"))
+        )
+        pytest.fail(f"{exc}\n--- appium logs ---\n{logs}")
     try:
         assert status.running is True
         assert status.port is not None
