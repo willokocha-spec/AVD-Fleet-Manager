@@ -8,30 +8,44 @@ Repository: <https://github.com/willokocha-spec/AVD-Fleet-Manager>
 
 AVD Fleet (`avdfleet`) turns a powerful workstation into a repeatable Android device lab:
 
-- one-command installer for the Android SDK, emulator, JDK, Node, Appium 4 and scrcpy
+- one-command installer for the Android SDK, emulator, JDK, Node, Appium and scrcpy,
+  resuming across the WHPX reboot and re-running as a no-op
 - catalogue, download and custom-import system images (Google APIs, Play Store, AOSP)
-- deploy and supervise up to **64 AVDs**, each with an isolated authenticated proxy
-- verify the Out-of-Box-Experience (OOBE) state and reset any AVD to it
-- run adb-shell, host-Python and Appium scripts across the whole fleet in parallel
-- a **portable edition** that runs offline from a USB stick without admin rights
+- deploy and supervise fleets of AVDs (the port range allows 64; real capacity is
+  RAM/CPU bound) from a GUI, CLI or loopback REST/WebSocket API, each instance on its
+  own authenticated proxy whose bridge outlives the CLI invocation that started it
+- detect the Out-of-Box-Experience state, and reset back to it on images that ship a
+  Setup Wizard. Modern stock images (API 33+) ship none, so the practical OOBE target
+  is API 25 `google_apis` - see [docs/oobe-api25.md](docs/oobe-api25.md) for the
+  verified repeatable recipe and the gate that has to be crossed
+- run adb-shell, host-Python and Appium scripts across instances with live output,
+  cancellation and timeouts
+- a portable edition that runs offline from a removable drive without admin rights
+  (built and unit-tested; not yet exercised on a fresh machine)
 
-> Out of scope by design: rooting or modifying Play Store images, bypassing
-> Play Integrity/SafetyNet, device fingerprint spoofing and automated Google account
-> creation. AVD Fleet only uses stock or user-supplied images.
+Verified live on a Windows 11 / WHPX host: real AVD boots, OOBE detection, per-instance
+proxy isolation measured against 12 real authenticated proxies, a real UiAutomator2
+Appium session, and adb / host-Python script fan-out. See
+[docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md); the
+item-by-item truth, including what is still unverified, is in
+[docs/acceptance.md](docs/acceptance.md).
 
 ## Project status (read this first)
 
 The engine, API, CLI, GUI and portable bundler are implemented and covered by
-fakes-backed unit, contract, API, integration, portable, CLI and UI tests. A
-first real-emulator acceptance pass has been produced on a WHPX host (Windows
-11): real AVDs boot and OOBE, script fan-out and the fleet dry run were
-exercised against them - see
-[docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md). The
-original build host had no usable hypervisor, so the proxy gate (G1), real
-Appium sessions and custom-image boot are still **unverified**, not passed. The
-item-by-item truth is in [docs/acceptance.md](docs/acceptance.md); the final
-build report is in [FINAL_REPORT.md](FINAL_REPORT.md). Re-run
-`avdfleet selftest --e2e` on an accelerated host to reproduce.
+fakes-backed unit, contract, API, integration, portable, CLI and UI tests, and a
+real-emulator acceptance pass has been produced on a WHPX host (Windows 11):
+`avdfleet selftest --e2e` runs green with real evidence, AVDs boot for real, OOBE
+detection, per-instance proxy isolation and Appium sessions have all been exercised
+against live instances - see
+[docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md). Still
+unverified: custom-image boot, the portable edition on a fresh machine, the installer
+container matrix, a five-instance parallel fan-out, and product-integrated
+reset-to-OOBE on stock images (the recipe works, wiring it into `avdfleet` is future
+work - [docs/oobe-api25.md](docs/oobe-api25.md)). Item-by-item truth is in
+[docs/acceptance.md](docs/acceptance.md); the build report is in
+[FINAL_REPORT.md](FINAL_REPORT.md). Re-run `avdfleet selftest --e2e` on an accelerated
+host to reproduce.
 
 ## Quick start (installed edition)
 
@@ -48,6 +62,21 @@ chmod +x bootstrap/install.sh
 # Windows (PowerShell; elevated recommended)
 powershell -ExecutionPolicy Bypass -File .\bootstrap\install.ps1 -AcceptAndroidSdkLicenses -Yes
 ```
+
+> **The package is not on PyPI yet**, so the bootstrap's `uv tool install avdfleet`
+> step cannot resolve from the index. Build a wheel from this checkout first and
+> point the bootstrap at it:
+>
+> ```powershell
+> uv build --wheel
+> $env:AVDFLEET_PACKAGE_SPEC = "$PWD\dist\avdfleet-0.1.0-py3-none-any.whl"
+> powershell -ExecutionPolicy Bypass -File .\bootstrap\install.ps1 -AcceptAndroidSdkLicenses -Yes
+> ```
+>
+> Equivalently, install the tool directly and run the engine:
+> `uv tool install --python 3.13 .\dist\avdfleet-0.1.0-py3-none-any.whl` then
+> `avdfleet install --accept-android-sdk-licenses --yes`. The Python requirement is
+> `>=3.11,<3.14`, so a 3.13 interpreter is selected explicitly.
 
 Windows may reboot once (WHPX); re-run the same command afterwards and the
 installer resumes. A second run is a no-op. Then:
@@ -121,9 +150,10 @@ and [settings.png](docs/screenshots/settings.png).
 
 ## Editions
 
-- **Installed** — `uv tool install avdfleet` plus a one-command bootstrap; one
-  Python package, one loopback daemon serving REST, WebSockets and the built
-  React GUI; state under the platform data directory.
+- **Installed** — one Python package installed as a `uv tool` (from a wheel built in
+  this checkout while the project is unpublished), plus a one-command bootstrap; one
+  loopback daemon serving REST, WebSockets and the built React GUI; state under the
+  platform data directory.
 - **Portable** — a self-contained per-host folder (relocatable Python runtime,
   SDK tools, Appium, UI, state) built from a prepared cache, with launchers,
   checksum manifest, preflight checks and relocation support. Windows/macOS/Linux
@@ -180,6 +210,6 @@ not redistributed by this project.
 ## Publishing
 
 See [PUBLISHING.md](PUBLISHING.md) for the GitHub prerequisites, commands, release-asset
-layout and pre-publish checklist. Prebuilt portable bundles and a GitHub-ready source
-archive are under `dist/` (`AVD-Fleet-Portable-Windows-*.zip`,
-`avdfleet-0.1.0-source.zip`, `SHA256SUMS.txt`).
+layout and pre-publish checklist. Release artifacts are produced on demand with
+`python scripts/build_release.py` (wheel, optional sdist and the portable bundle) and
+attached to a GitHub release; this repository does not check in a `dist/` directory.

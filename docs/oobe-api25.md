@@ -144,8 +144,9 @@ deterministically.
 
 - API 25 images are x86 only (`google_apis;x86`, no `x86_64`), so they run on
   any x86_64 host with WHPX but exercise 32-bit ABI behaviour.
-- Play Store images are out of scope for tampering by design (see README), so
-  rooting work targets `google_apis` / `default` images.
+- Play Store images are `ro.build.type=user` / `ro.debuggable=0`, so `adb root` is
+  refused and they cannot be rooted this way; rooting work targets the `google_apis`
+  and `default` images, which are userdebug.
 - A real rooted-image workflow must cope with the emulator's read-only system
   partition: `-writable-system` plus `adb root` + `adb remount` gives a writable
   `/system` for the life of that boot, and the changes live in the AVD's qcow2

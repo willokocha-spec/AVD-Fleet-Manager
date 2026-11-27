@@ -142,9 +142,7 @@ passed. The bootstrap passes it through; there is no default `yes |` pipe. Googl
 Play/Google APIs image terms are surfaced as part of the SDK licence review; AVD
 Fleet does not accept third-party terms on your behalf, and Google's SDK licence
 does not permit redistributing Google components — relevant to the portable
-edition (see [portable.md](portable.md)). Out of scope: rooting/modifying Play
-images, Play Integrity/SafetyNet bypass, fingerprint spoofing and automated
-Google account creation.
+edition (see [portable.md](portable.md)).
 
 ## Environment and configuration
 

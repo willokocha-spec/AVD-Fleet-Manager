@@ -1312,7 +1312,9 @@ def _vendored_launcher_stub() -> bytes | None:
     try:
         import pip._vendor.distlib as _distlib  # type: ignore[import-not-found]
     except Exception:  # pragma: no cover - depends on the environment
-        _distlib = None
+        # Resolved as a module when pip is installed (CI, system Pythons) and as
+        # an unresolved Any inside pip-less virtualenvs (uv), hence the ignore.
+        _distlib = None  # type: ignore[assignment]
     if _distlib is not None:
         stub = _launcher_stub_from_directory(Path(_distlib.__file__).parent)
         if stub is not None:

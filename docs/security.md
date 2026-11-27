@@ -16,8 +16,8 @@ checked by tests/reviews.
   or traverse paths.
 - **Compromised UI**: served locally; no secrets in localStorage beyond the API token.
 
-Out of scope: a multi-user server deployment, hostile root/admin on the same machine,
-Google Play Integrity bypass or device-fingerprint spoofing.
+Out of scope: a multi-user server deployment, and hostile root/admin on the same
+machine.
 
 ## API
 
