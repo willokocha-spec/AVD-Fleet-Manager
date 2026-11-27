@@ -52,31 +52,31 @@ host to reproduce.
 Prerequisites and per-OS details: [Windows](docs/quickstart-windows.md) ·
 [macOS](docs/quickstart-macos.md) · [Linux](docs/quickstart-linux.md).
 
+**The package is not published on PyPI yet**, so the bootstrap's `uv tool install
+avdfleet` step cannot resolve from the index. Build a wheel from this checkout first
+and point the bootstrap at it:
+
 ```bash
 # macOS / Linux
+uv build --wheel
+export AVDFLEET_PACKAGE_SPEC="$PWD/dist/avdfleet-0.1.0-py3-none-any.whl"
 chmod +x bootstrap/install.sh
 ./bootstrap/install.sh --accept-android-sdk-licenses --yes
 ```
 
 ```powershell
 # Windows (PowerShell; elevated recommended)
+uv build --wheel
+$env:AVDFLEET_PACKAGE_SPEC = "$PWD\dist\avdfleet-0.1.0-py3-none-any.whl"
 powershell -ExecutionPolicy Bypass -File .\bootstrap\install.ps1 -AcceptAndroidSdkLicenses -Yes
 ```
 
-> **The package is not on PyPI yet**, so the bootstrap's `uv tool install avdfleet`
-> step cannot resolve from the index. Build a wheel from this checkout first and
-> point the bootstrap at it:
->
-> ```powershell
-> uv build --wheel
-> $env:AVDFLEET_PACKAGE_SPEC = "$PWD\dist\avdfleet-0.1.0-py3-none-any.whl"
-> powershell -ExecutionPolicy Bypass -File .\bootstrap\install.ps1 -AcceptAndroidSdkLicenses -Yes
-> ```
->
-> Equivalently, install the tool directly and run the engine:
-> `uv tool install --python 3.13 .\dist\avdfleet-0.1.0-py3-none-any.whl` then
-> `avdfleet install --accept-android-sdk-licenses --yes`. The Python requirement is
-> `>=3.11,<3.14`, so a 3.13 interpreter is selected explicitly.
+`AVDFLEET_PACKAGE_SPEC` also accepts a git URL or a pinned version, and a local path
+that does not exist is rejected before anything is installed (see
+[bootstrap/README.md](bootstrap/README.md)). To skip the bootstrap entirely:
+`uv tool install --python 3.13 .\dist\avdfleet-0.1.0-py3-none-any.whl`, then
+`avdfleet install --accept-android-sdk-licenses --yes`. The Python requirement is
+`>=3.11,<3.14`, so a 3.13 interpreter is selected explicitly.
 
 Windows may reboot once (WHPX); re-run the same command afterwards and the
 installer resumes. A second run is a no-op. Then:
