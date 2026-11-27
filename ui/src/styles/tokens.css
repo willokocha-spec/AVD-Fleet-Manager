@@ -1,0 +1,165 @@
+/* ==========================================================================
+   AVD Fleet design tokens — dark-first, light opt-in via [data-theme="light"].
+   Only these variables should be referenced by component/layout CSS.
+   ========================================================================== */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg: #080b11;
+  --bg-deep: #060910;
+  --bg-gradient-a: #0c1420;
+  --bg-gradient-b: #080b12;
+  --surface: #111722;
+  --surface-raised: #151d2a;
+  --surface-sunken: #0c121b;
+  --surface-hover: #1a2434;
+  --surface-active: #1e2a3c;
+  --overlay: rgba(4, 7, 12, 0.72);
+
+  /* Borders */
+  --border: #1f2938;
+  --border-strong: #2c3a4e;
+  --border-subtle: #18202c;
+  --border-focus: #6aa8ff;
+
+  /* Text */
+  --text: #e9eef7;
+  --text-secondary: #b7c3d6;
+  --text-muted: #8b99ae;
+  --text-subtle: #667389;
+  --text-inverse: #07101d;
+
+  /* Accent + semantic */
+  --accent: #6aa8ff;
+  --accent-hover: #8bbaff;
+  --accent-strong: #3b82f6;
+  --accent-soft: rgba(106, 168, 255, 0.14);
+  --accent-contrast: #061120;
+  --violet: #a78bfa;
+  --violet-soft: rgba(167, 139, 250, 0.14);
+
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.13);
+  --success-strong: #22c55e;
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.13);
+  --warning-strong: #f59e0b;
+  --danger: #fb7185;
+  --danger-soft: rgba(251, 113, 133, 0.13);
+  --danger-strong: #ef4444;
+  --info: #60a5fa;
+  --info-soft: rgba(96, 165, 250, 0.13);
+
+  /* Effects */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 8px 24px -12px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.25);
+  --shadow-lg: 0 24px 64px -24px rgba(0, 0, 0, 0.75), 0 8px 24px -12px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 0 1px rgba(106, 168, 255, 0.16), 0 12px 40px -20px rgba(106, 168, 255, 0.35);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(106, 168, 255, 0.55);
+
+  /* Typography */
+  --font-sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono",
+    monospace;
+  --fs-2xs: 0.6875rem;
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.8125rem;
+  --fs-md: 0.875rem;
+  --fs-lg: 1rem;
+  --fs-xl: 1.125rem;
+  --fs-title: 1.375rem;
+  --fs-page: 1.75rem;
+  --fs-display: 2.25rem;
+  --lh-tight: 1.2;
+  --lh-normal: 1.55;
+
+  /* Spacing / shape */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --radius-xs: 5px;
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-pill: 999px;
+  --sidebar-width: 248px;
+  --sidebar-collapsed: 74px;
+  --topbar-height: 60px;
+  --content-max: 1440px;
+  --transition: 140ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f3f5f9;
+  --bg-deep: #eaeef5;
+  --bg-gradient-a: #eef3fb;
+  --bg-gradient-b: #f6f8fc;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f2f5fa;
+  --surface-hover: #eef2f9;
+  --surface-active: #e6ecf7;
+  --overlay: rgba(20, 30, 46, 0.42);
+
+  --border: #dbe2ee;
+  --border-strong: #c2cddd;
+  --border-subtle: #e8edf5;
+  --border-focus: #2563eb;
+
+  --text: #0f1a2b;
+  --text-secondary: #3c4c63;
+  --text-muted: #5c6b82;
+  --text-subtle: #7b889d;
+  --text-inverse: #ffffff;
+
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-strong: #1d4ed8;
+  --accent-soft: rgba(37, 99, 235, 0.1);
+  --accent-contrast: #ffffff;
+  --violet: #7c3aed;
+  --violet-soft: rgba(124, 58, 237, 0.1);
+
+  --success: #15803d;
+  --success-soft: rgba(21, 128, 61, 0.1);
+  --success-strong: #16a34a;
+  --warning: #a16207;
+  --warning-soft: rgba(161, 98, 7, 0.12);
+  --warning-strong: #ca8a04;
+  --danger: #be123c;
+  --danger-soft: rgba(190, 18, 60, 0.1);
+  --danger-strong: #e11d48;
+  --info: #1d4ed8;
+  --info-soft: rgba(29, 78, 216, 0.1);
+
+  --shadow-sm: 0 1px 2px rgba(15, 26, 43, 0.08);
+  --shadow-md: 0 10px 30px -18px rgba(15, 26, 43, 0.3), 0 2px 6px rgba(15, 26, 43, 0.06);
+  --shadow-lg: 0 28px 70px -30px rgba(15, 26, 43, 0.35), 0 10px 24px -16px rgba(15, 26, 43, 0.18);
+  --shadow-glow: 0 0 0 1px rgba(37, 99, 235, 0.12), 0 12px 40px -22px rgba(37, 99, 235, 0.35);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(37, 99, 235, 0.45);
+}
+
+@media (prefers-contrast: more) {
+  :root,
+  :root[data-theme="dark"] {
+    --border: #334155;
+    --text-muted: #a5b3c7;
+  }
+  :root[data-theme="light"] {
+    --border: #9aa9bd;
+    --text-muted: #46566d;
+  }
+}

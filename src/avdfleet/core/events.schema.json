@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avdfleet.example/schemas/events.schema.json",
+  "title": "AVD Fleet Event",
+  "description": "Envelope for every event emitted on the /ws/events WebSocket and returned by GET /api/v1/events.",
+  "type": "object",
+  "required": ["id", "type", "ts", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "type": {
+      "type": "string",
+      "enum": [
+        "instance.created",
+        "instance.deleted",
+        "instance.state",
+        "instance.boot",
+        "instance.log",
+        "instance.screen",
+        "proxy.created",
+        "proxy.updated",
+        "proxy.checked",
+        "script.run.started",
+        "script.run.output",
+        "script.run.finished",
+        "install.step",
+        "install.finished",
+        "oobe.result",
+        "doctor.finished",
+        "fleet.applied",
+        "system",
+        "error",
+        "log"
+      ]
+    },
+    "ts": { "type": "string", "format": "date-time" },
+    "source": { "type": "string", "default": "avdfleet" },
+    "seq": { "type": ["integer", "null"], "minimum": 1 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "instance.state" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["instance", "state"],
+            "properties": {
+              "instance": { "type": "string" },
+              "state": {
+                "type": "string",
+                "enum": ["defined", "stopped", "starting", "booting", "running", "stopping", "error", "unknown"]
+              },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "script.run.output" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["run_id", "instance", "stream", "line"],
+            "properties": {
+              "run_id": { "type": "string" },
+              "instance": { "type": "string" },
+              "stream": { "type": "string", "enum": ["stdout", "stderr"] },
+              "line": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "install.step" } } },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["step", "status"],
+            "properties": {
+              "step": { "type": "string" },
+              "status": {
+                "type": "string",
+                "enum": ["pending", "running", "succeeded", "failed", "skipped", "reboot_required"]
+              },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

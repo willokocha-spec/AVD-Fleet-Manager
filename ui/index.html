@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="AVD Fleet — deploy, isolate and automate Android Virtual Device fleets." />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0b0f16" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>AVD Fleet</title>
+    <script>
+      // Apply the persisted theme before first paint to avoid a flash of the wrong
+      // palette. Keep the storage key in sync with src/app/ThemeProvider.tsx.
+      (function () {
+        try {
+          var stored = window.localStorage.getItem("avdfleet.theme");
+          var theme = stored === "light" || stored === "dark" ? stored : "dark";
+          if (stored === "system") {
+            theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          }
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (error) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>AVD Fleet requires JavaScript. Enable it in your browser and reload.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

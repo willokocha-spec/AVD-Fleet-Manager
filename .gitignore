@@ -1,0 +1,45 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/build/
+/dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node / UI
+node_modules/
+ui/dist/
+ui/playwright-report/
+ui/test-results/
+*.tsbuildinfo
+
+# Runtime state and artifacts (root-anchored: package directories may share
+# names such as platform/sdk, platform/avd, portable/bundle/cache)
+/.avdfleet/
+/data/
+/sdk/
+/avd/
+/cache/
+/logs/
+*.db
+*.db-wal
+*.db-shm
+secrets.vault
+secrets.key
+token
+research/g1/artifacts/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

@@ -1,0 +1,1717 @@
+openapi: 3.1.0
+info:
+  title: AVD Fleet API
+  version: 0.1.0
+  description: |
+    REST API for the AVD Fleet daemon. All /api/v1 routes require a bearer token
+    unless `auth_required` is disabled. The token is stored in the data directory
+    with owner-only permissions. WebSocket clients pass the token as `?token=`
+    and must send an allowed Origin.
+
+    Secrets are never returned: proxy passwords are always masked, and error
+    bodies are redacted. Destructive operations accept `dry_run` where documented.
+servers:
+  - url: http://127.0.0.1:8765
+    description: Default loopback daemon
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: images
+  - name: oobe
+  - name: templates
+  - name: instances
+  - name: proxies
+  - name: scripts
+  - name: appium
+  - name: fleet
+  - name: portable
+  - name: events
+paths:
+  /health:
+    get:
+      tags: [system]
+      operationId: getHealth
+      security: []
+      summary: Liveness probe (unauthenticated)
+      responses:
+        "200":
+          description: Daemon is alive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+  /api/v1/auth/check:
+    get:
+      tags: [system]
+      operationId: checkAuth
+      summary: Validate the bearer token
+      responses:
+        "200":
+          description: Token accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthCheck" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/system:
+    get:
+      tags: [system]
+      operationId: getSystem
+      summary: Host and runtime information
+      responses:
+        "200":
+          description: System information
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/config:
+    get:
+      tags: [system]
+      operationId: getConfig
+      summary: Effective configuration (no secrets)
+      responses:
+        "200":
+          description: Configuration view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigView" }
+    patch:
+      tags: [system]
+      operationId: updateConfig
+      summary: Update a whitelisted subset of settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfigPatch" }
+      responses:
+        "200":
+          description: Updated configuration
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigView" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/doctor:
+    get:
+      tags: [system]
+      operationId: runDoctor
+      summary: Run environment doctor checks
+      parameters:
+        - name: slow
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Doctor report
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DoctorReport" }
+  /api/v1/doctor/fix:
+    post:
+      tags: [system]
+      operationId: fixDoctorCheck
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [check_id]
+              properties:
+                check_id: { type: string }
+      responses:
+        "200":
+          description: Fix outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/capacity:
+    get:
+      tags: [instances]
+      operationId: getCapacity
+      summary: Fleet capacity (RAM, ports, CPU)
+      responses:
+        "200":
+          description: Capacity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapacityInfo" }
+  /api/v1/images:
+    get:
+      tags: [images]
+      operationId: listImages
+      parameters:
+        - name: include_remote
+          in: query
+          schema: { type: boolean, default: true }
+        - name: installed_only
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: System images
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SystemImage" }
+    post:
+      tags: [images]
+      operationId: importImage
+      summary: Import a custom system image from a host directory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImageImportRequest" }
+      responses:
+        "201":
+          description: Imported image
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemImage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/v1/images/refresh:
+    post:
+      tags: [images]
+      operationId: refreshImages
+      responses:
+        "200":
+          description: Refreshed image catalogue
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SystemImage" }
+  /api/v1/images/{image_id}:
+    get:
+      tags: [images]
+      operationId: getImage
+      parameters:
+        - $ref: "#/components/parameters/ImageId"
+      responses:
+        "200":
+          description: Image
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemImage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/images/{image_id}/download:
+    post:
+      tags: [images]
+      operationId: downloadImage
+      parameters:
+        - $ref: "#/components/parameters/ImageId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Installed image
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SystemImage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/oobe/matrix:
+    get:
+      tags: [oobe]
+      operationId: getOobeMatrix
+      responses:
+        "200":
+          description: OOBE matrix
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OobeMatrix" }
+  /api/v1/oobe/verify:
+    post:
+      tags: [oobe]
+      operationId: verifyOobeImage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image_id]
+              properties:
+                image_id: { type: string }
+                timeout_s: { type: integer, minimum: 30, maximum: 1800 }
+                keep_avd: { type: boolean, default: false }
+      responses:
+        "200":
+          description: OOBE record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OobeRecord" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/oobe/records/{image_id}:
+    get:
+      tags: [oobe]
+      operationId: getOobeRecord
+      parameters:
+        - name: image_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OOBE record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OobeRecord" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/templates:
+    get:
+      tags: [templates]
+      operationId: listTemplates
+      responses:
+        "200":
+          description: AVD templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Template" }
+    post:
+      tags: [templates]
+      operationId: createTemplate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Template" }
+      responses:
+        "201":
+          description: Created template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/templates/{template_id}:
+    get:
+      tags: [templates]
+      operationId: getTemplate
+      parameters:
+        - $ref: "#/components/parameters/TemplateId"
+      responses:
+        "200":
+          description: Template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [templates]
+      operationId: updateTemplate
+      parameters:
+        - $ref: "#/components/parameters/TemplateId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Template" }
+      responses:
+        "200":
+          description: Updated template
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Template" }
+    delete:
+      tags: [templates]
+      operationId: deleteTemplate
+      parameters:
+        - $ref: "#/components/parameters/TemplateId"
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/devices:
+    get:
+      tags: [templates]
+      operationId: listDeviceProfiles
+      responses:
+        "200":
+          description: Device profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DeviceProfile" }
+  /api/v1/instances:
+    get:
+      tags: [instances]
+      operationId: listInstances
+      responses:
+        "200":
+          description: Instances
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AvdInfo" }
+    post:
+      tags: [instances]
+      operationId: createInstance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstanceCreateRequest" }
+      responses:
+        "201":
+          description: Created instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/instances/bulk:
+    post:
+      tags: [instances]
+      operationId: bulkDeployInstances
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDeployRequest" }
+      responses:
+        "201":
+          description: Created instances
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AvdInfo" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/instances/{name}:
+    get:
+      tags: [instances]
+      operationId: getInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      responses:
+        "200":
+          description: Instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [instances]
+      operationId: deleteInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+        - name: delete_files
+          in: query
+          schema: { type: boolean, default: true }
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/instances/{name}/start:
+    post:
+      tags: [instances]
+      operationId: startInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                proxy_id: { type: [string, "null"] }
+                headless: { type: [boolean, "null"] }
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Started instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/instances/{name}/stop:
+    post:
+      tags: [instances]
+      operationId: stopInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force: { type: boolean, default: false }
+                timeout_s: { type: [number, "null"] }
+      responses:
+        "200":
+          description: Stopped instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+  /api/v1/instances/{name}/restart:
+    post:
+      tags: [instances]
+      operationId: restartInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      responses:
+        "200":
+          description: Restarted instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+  /api/v1/instances/{name}/wait-boot:
+    post:
+      tags: [instances]
+      operationId: waitBoot
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout_s: { type: [integer, "null"] }
+      responses:
+        "200":
+          description: Booted instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+        "504": { $ref: "#/components/responses/Timeout" }
+  /api/v1/instances/{name}/reset-oobe:
+    post:
+      tags: [instances, oobe]
+      operationId: resetInstanceOobe
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                strategy: { type: string, enum: [snapshot, wipe, package, reboot] }
+                verify: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Reset result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OobeResetResult" }
+  /api/v1/instances/{name}/screenshot:
+    get:
+      tags: [instances, screen]
+      operationId: getScreenshot
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      responses:
+        "200":
+          description: PNG screenshot
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v1/instances/{name}/config:
+    put:
+      tags: [instances]
+      operationId: updateInstanceConfig
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [values]
+              properties:
+                values:
+                  type: object
+                  additionalProperties: { type: string }
+                dry_run: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Updated instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+  /api/v1/instances/{name}/clone:
+    post:
+      tags: [instances]
+      operationId: cloneInstance
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: Cloned instance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AvdInfo" }
+  /api/v1/instances/{name}/snapshots:
+    get:
+      tags: [instances]
+      operationId: listSnapshots
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      responses:
+        "200":
+          description: Snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Snapshot" }
+    post:
+      tags: [instances]
+      operationId: createSnapshot
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                golden: { type: boolean, default: false }
+      responses:
+        "201":
+          description: Snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Snapshot" }
+  /api/v1/instances/{name}/snapshots/{snapshot}/load:
+    post:
+      tags: [instances]
+      operationId: loadSnapshot
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+        - name: snapshot
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Snapshot restored
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Snapshot" }
+  /api/v1/instances/{name}/snapshots/{snapshot}:
+    delete:
+      tags: [instances]
+      operationId: deleteSnapshot
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+        - name: snapshot
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted }
+  /api/v1/instances/{name}/input:
+    post:
+      tags: [instances, screen]
+      operationId: sendInput
+      parameters:
+        - $ref: "#/components/parameters/InstanceName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InputRequest" }
+      responses:
+        "200":
+          description: Input delivered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OperationResult" }
+  /api/v1/proxies:
+    get:
+      tags: [proxies]
+      operationId: listProxies
+      parameters:
+        - name: include_disabled
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Proxies (passwords masked)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProxyView" }
+    post:
+      tags: [proxies]
+      operationId: createProxy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProxyCreateRequest" }
+      responses:
+        "201":
+          description: Created proxy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyView" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/proxies/import:
+    post:
+      tags: [proxies]
+      operationId: importProxies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, description: "One proxy URL per line" }
+                source: { type: string, default: paste }
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyImportResult" }
+  /api/v1/proxies/check-all:
+    post:
+      tags: [proxies]
+      operationId: checkAllProxies
+      responses:
+        "200":
+          description: Check results
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProxyTestResult" }
+  /api/v1/proxies/{proxy_id}:
+    get:
+      tags: [proxies]
+      operationId: getProxy
+      parameters:
+        - $ref: "#/components/parameters/ProxyId"
+      responses:
+        "200":
+          description: Proxy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyView" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [proxies]
+      operationId: updateProxy
+      parameters:
+        - $ref: "#/components/parameters/ProxyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        "200":
+          description: Updated proxy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyView" }
+    delete:
+      tags: [proxies]
+      operationId: deleteProxy
+      parameters:
+        - $ref: "#/components/parameters/ProxyId"
+      responses:
+        "204": { description: Deleted }
+  /api/v1/proxies/{proxy_id}/check:
+    post:
+      tags: [proxies]
+      operationId: checkProxy
+      parameters:
+        - $ref: "#/components/parameters/ProxyId"
+      responses:
+        "200":
+          description: Check result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyTestResult" }
+  /api/v1/proxies/verify-guest:
+    post:
+      tags: [proxies]
+      operationId: verifyGuestEgress
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [avd_name, proxy_id]
+              properties:
+                avd_name: { type: string }
+                proxy_id: { type: string }
+                token_url: { type: [string, "null"] }
+                timeout_s: { type: [number, "null"] }
+      responses:
+        "200":
+          description: Guest egress result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyTestResult" }
+  /api/v1/assignments:
+    get:
+      tags: [proxies]
+      operationId: listAssignments
+      responses:
+        "200":
+          description: Proxy assignments
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProxyAssignment" }
+    post:
+      tags: [proxies]
+      operationId: assignProxy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [avd_name, proxy_id]
+              properties:
+                avd_name: { type: string }
+                proxy_id: { type: string }
+      responses:
+        "200":
+          description: Assignment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProxyAssignment" }
+  /api/v1/assignments/{avd_name}:
+    delete:
+      tags: [proxies]
+      operationId: unassignProxy
+      parameters:
+        - name: avd_name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Unassigned }
+  /api/v1/assignments/auto:
+    post:
+      tags: [proxies]
+      operationId: autoAssignProxies
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [instances]
+              properties:
+                instances:
+                  type: array
+                  items: { type: string }
+                strategy:
+                  type: string
+                  enum: [round_robin, random, healthiest]
+                  default: round_robin
+      responses:
+        "200":
+          description: Assignments
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProxyAssignment" }
+  /api/v1/bridges:
+    get:
+      tags: [proxies]
+      operationId: listBridges
+      responses:
+        "200":
+          description: Active local bridges
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BridgeConfig" }
+  /api/v1/scripts:
+    get:
+      tags: [scripts]
+      operationId: listScripts
+      responses:
+        "200":
+          description: Scripts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScriptDefinition" }
+    post:
+      tags: [scripts]
+      operationId: createScript
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScriptDefinition" }
+      responses:
+        "201":
+          description: Created script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptDefinition" }
+  /api/v1/scripts/{script_id}:
+    get:
+      tags: [scripts]
+      operationId: getScript
+      parameters:
+        - name: script_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptDefinition" }
+    put:
+      tags: [scripts]
+      operationId: updateScript
+      parameters:
+        - name: script_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScriptDefinition" }
+      responses:
+        "200":
+          description: Updated script
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptDefinition" }
+    delete:
+      tags: [scripts]
+      operationId: deleteScript
+      parameters:
+        - name: script_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Deleted }
+  /api/v1/scripts/runs:
+    post:
+      tags: [scripts]
+      operationId: startScriptRun
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScriptRunRequest" }
+      responses:
+        "202":
+          description: Run accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/runs:
+    get:
+      tags: [scripts]
+      operationId: listRuns
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, minimum: 1, maximum: 500 }
+      responses:
+        "200":
+          description: Script runs
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ScriptRun" }
+  /api/v1/runs/{run_id}:
+    get:
+      tags: [scripts]
+      operationId: getRun
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Script run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptRun" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/runs/{run_id}/cancel:
+    post:
+      tags: [scripts]
+      operationId: cancelRun
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Cancelled run
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScriptRun" }
+  /api/v1/appium:
+    get:
+      tags: [appium]
+      operationId: getAppiumStatus
+      responses:
+        "200":
+          description: Appium status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppiumStatus" }
+  /api/v1/appium/start:
+    post:
+      tags: [appium]
+      operationId: startAppium
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                port: { type: [integer, "null"] }
+      responses:
+        "200":
+          description: Appium status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppiumStatus" }
+  /api/v1/appium/stop:
+    post:
+      tags: [appium]
+      operationId: stopAppium
+      responses:
+        "200":
+          description: Appium status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppiumStatus" }
+  /api/v1/appium/capabilities:
+    post:
+      tags: [appium]
+      operationId: getAppiumCapabilities
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [avd_name]
+              properties:
+                avd_name: { type: string }
+      responses:
+        "200":
+          description: UiAutomator2 capabilities
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/v1/fleet/plan:
+    post:
+      tags: [fleet]
+      operationId: planFleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FleetRequest" }
+      responses:
+        "200":
+          description: Fleet plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetPlan" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/fleet/apply:
+    post:
+      tags: [fleet]
+      operationId: applyFleet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FleetRequest" }
+      responses:
+        "200":
+          description: Applied plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetPlan" }
+  /api/v1/portable/status:
+    get:
+      tags: [portable]
+      operationId: getPortableStatus
+      responses:
+        "200":
+          description: Portable status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PortableStatus" }
+  /api/v1/portable/checks:
+    get:
+      tags: [portable]
+      operationId: getPortableChecks
+      responses:
+        "200":
+          description: Checks
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CheckResult" }
+  /api/v1/events:
+    get:
+      tags: [events]
+      operationId: listEvents
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: Recent events
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Event" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  parameters:
+    InstanceName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    TemplateId:
+      name: template_id
+      in: path
+      required: true
+      schema: { type: string }
+    ImageId:
+      name: image_id
+      in: path
+      required: true
+      schema: { type: string }
+    ProxyId:
+      name: proxy_id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Forbidden:
+      description: Origin or permission denied
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Conflict:
+      description: Conflicting state
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Timeout:
+      description: Operation timed out
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ServiceUnavailable:
+      description: Dependency unavailable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            hint: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        version: { type: string }
+        uptime_s: { type: number }
+        emulator_available: { type: boolean }
+        database: { type: string }
+    AuthCheck:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+        expires_at: { type: [string, "null"] }
+    AcceleratorInfo:
+      type: object
+      properties:
+        kind: { type: string, enum: [whpx, aehd, kvm, hvf, none] }
+        available: { type: boolean }
+        detail: { type: string }
+        requires_reboot: { type: boolean }
+        nested: { type: [boolean, "null"] }
+    HostInfo:
+      type: object
+      properties:
+        os: { type: string, enum: [windows, macos, linux, unknown] }
+        os_name: { type: string }
+        os_version: { type: string }
+        arch: { type: string, enum: [x86_64, arm64, unknown] }
+        machine: { type: string }
+        python_version: { type: string }
+        is_admin: { type: boolean }
+        is_wsl: { type: boolean }
+        is_container: { type: boolean }
+        cpu_count: { type: integer }
+        total_ram_gb: { type: number }
+        free_disk_gb: { type: number }
+        hypervisor: { $ref: "#/components/schemas/AcceleratorInfo" }
+        acceleration_available: { type: boolean }
+        details:
+          type: object
+          additionalProperties: true
+    SystemInfo:
+      allOf:
+        - $ref: "#/components/schemas/HostInfo"
+        - type: object
+          properties:
+            version: { type: string }
+            edition: { type: string, enum: [installed, portable] }
+            uptime_s: { type: number }
+            sdk_root: { type: string }
+            data_dir: { type: string }
+            accelerator_ok: { type: boolean }
+    ConfigView:
+      type: object
+      properties:
+        edition: { type: string }
+        api_host: { type: string }
+        api_port: { type: integer }
+        max_instances: { type: integer }
+        default_ram_mb: { type: integer }
+        headless: { type: boolean }
+        gpu_mode: { type: string }
+        sdk_root: { type: string }
+        data_dir: { type: string }
+        auth_required: { type: boolean }
+        version: { type: string }
+        theme: { type: string }
+    ConfigPatch:
+      type: object
+      properties:
+        headless: { type: boolean }
+        gpu_mode: { type: string }
+        max_instances: { type: integer, minimum: 1, maximum: 64 }
+        default_ram_mb: { type: integer, minimum: 512 }
+        theme: { type: string }
+        log_level: { type: string }
+      additionalProperties: false
+    DoctorCheck:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        status: { type: string, enum: [ok, warn, fail, skip] }
+        detail: { type: string }
+        hint: { type: string }
+        fixable: { type: boolean }
+        fix_command: { type: string }
+    DoctorReport:
+      type: object
+      required: [ok, checks]
+      properties:
+        ok: { type: boolean }
+        host: { $ref: "#/components/schemas/HostInfo" }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/DoctorCheck" }
+        checked_at: { type: string, format: date-time }
+        summary: { type: string }
+    SystemImage:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        api_level: { type: integer }
+        tag: { type: string }
+        abi: { type: string }
+        kind: { type: string, enum: [google_apis, google_apis_playstore, aosp, default, custom, unknown] }
+        display_name: { type: string }
+        package: { type: string }
+        url: { type: [string, "null"] }
+        sha256: { type: [string, "null"] }
+        size_bytes: { type: [integer, "null"] }
+        installed: { type: boolean }
+        local_path: { type: [string, "null"] }
+        oobe_status: { type: string, enum: [verified, failed, unverified, unsupported] }
+        custom: { type: boolean }
+        notes: { type: string }
+    ImageImportRequest:
+      type: object
+      required: [path]
+      properties:
+        path: { type: string }
+        name: { type: [string, "null"] }
+        image_id: { type: [string, "null"] }
+        api_level: { type: [integer, "null"] }
+        abi: { type: [string, "null"] }
+    OobeRecord:
+      type: object
+      required: [image_id, status]
+      properties:
+        image_id: { type: string }
+        api_level: { type: integer }
+        tag: { type: string }
+        abi: { type: string }
+        status: { type: string, enum: [verified, failed, unverified, unsupported] }
+        activity: { type: string }
+        screenshot_path: { type: string }
+        boot_seconds: { type: [number, "null"] }
+        reset_seconds: { type: [number, "null"] }
+        checked_at: { type: [string, "null"], format: date-time }
+        checked_by: { type: string }
+        notes: { type: string }
+    OobeMatrix:
+      type: object
+      properties:
+        version: { type: string }
+        generated_at: { type: [string, "null"], format: date-time }
+        host_abi: { type: string }
+        records:
+          type: array
+          items: { $ref: "#/components/schemas/OobeRecord" }
+    DeviceProfile:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        resolution: { type: string }
+        density: { type: integer }
+        ram_mb: { type: integer }
+        tags:
+          type: array
+          items: { type: string }
+    Template:
+      type: object
+      required: [id, name, image_id]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        image_id: { type: string }
+        device_id: { type: string }
+        resolution: { type: string }
+        density: { type: [integer, "null"] }
+        ram_mb: { type: integer }
+        heap_mb: { type: integer }
+        cpu_cores: { type: integer }
+        gpu_mode: { type: string }
+        headless: { type: boolean }
+        proxy_id: { type: [string, "null"] }
+        scripts:
+          type: array
+          items: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        description: { type: string }
+        config:
+          type: object
+          additionalProperties: { type: string }
+    InstancePorts:
+      type: object
+      properties:
+        console: { type: integer }
+        adb: { type: integer }
+        grpc: { type: [integer, "null"] }
+        appium_server: { type: [integer, "null"] }
+        system_port: { type: [integer, "null"] }
+        mjpeg: { type: [integer, "null"] }
+    AvdInfo:
+      type: object
+      required: [name, state]
+      properties:
+        name: { type: string }
+        template_id: { type: [string, "null"] }
+        image_id: { type: [string, "null"] }
+        image_name: { type: string }
+        device_id: { type: string }
+        state: { type: string, enum: [defined, stopped, starting, booting, running, stopping, error, unknown] }
+        pid: { type: [integer, "null"] }
+        ports: { $ref: "#/components/schemas/InstancePorts" }
+        proxy_id: { type: [string, "null"] }
+        adb_serial: { type: [string, "null"] }
+        boot_completed: { type: boolean }
+        created_at: { type: [string, "null"], format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        uptime_seconds: { type: [number, "null"] }
+        error: { type: string }
+        config:
+          type: object
+          additionalProperties: { type: string }
+        grpc_endpoint: { type: [string, "null"] }
+        screen_available: { type: boolean }
+    InstanceCreateRequest:
+      type: object
+      required: [template_id, name]
+      properties:
+        template_id: { type: string }
+        name: { type: string, pattern: "^[a-zA-Z0-9._-]{1,63}$" }
+        overrides:
+          type: object
+          additionalProperties: true
+    BulkDeployRequest:
+      type: object
+      required: [template_id]
+      properties:
+        template_id: { type: string }
+        count: { type: integer, minimum: 1, maximum: 64, default: 1 }
+        prefix: { type: string, default: avd }
+        overrides:
+          type: object
+          additionalProperties: true
+    Snapshot:
+      type: object
+      properties:
+        name: { type: string }
+        avd_name: { type: string }
+        created_at: { type: [string, "null"], format: date-time }
+        size_bytes: { type: [integer, "null"] }
+        path: { type: [string, "null"] }
+        is_golden: { type: boolean }
+    OobeResetResult:
+      type: object
+      properties:
+        avd_name: { type: string }
+        strategy: { type: string }
+        ok: { type: boolean }
+        seconds: { type: [number, "null"] }
+        activity: { type: string }
+        screenshot_path: { type: string }
+        message: { type: string }
+    InputRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [tap, swipe, text, key] }
+        x: { type: integer }
+        y: { type: integer }
+        x1: { type: integer }
+        y1: { type: integer }
+        x2: { type: integer }
+        y2: { type: integer }
+        duration_ms: { type: integer }
+        text: { type: string }
+        keycode: { type: string }
+    ProxyView:
+      type: object
+      required: [id, host, port]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        scheme: { type: string, enum: [http, https, socks5] }
+        host: { type: string }
+        port: { type: integer }
+        username: { type: [string, "null"] }
+        has_credentials: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+        enabled: { type: boolean }
+        health:
+          type: object
+          additionalProperties: true
+        created_at: { type: [string, "null"], format: date-time }
+      description: Passwords are never returned; `has_credentials` indicates one is stored.
+    ProxyCreateRequest:
+      type: object
+      properties:
+        url: { type: string, description: "scheme://user:pass@host:port" }
+        name: { type: string }
+        scheme: { type: string, enum: [http, https, socks5] }
+        host: { type: string }
+        port: { type: integer }
+        username: { type: [string, "null"] }
+        password: { type: [string, "null"] }
+        tags:
+          type: array
+          items: { type: string }
+    ProxyImportResult:
+      type: object
+      properties:
+        added:
+          type: array
+          items: { $ref: "#/components/schemas/ProxyView" }
+        skipped: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+    ProxyTestResult:
+      type: object
+      properties:
+        proxy_id: { type: string }
+        ok: { type: boolean }
+        latency_ms: { type: [number, "null"] }
+        egress_ip: { type: [string, "null"] }
+        status_code: { type: [integer, "null"] }
+        error: { type: string }
+        checked_at: { type: string, format: date-time }
+    ProxyAssignment:
+      type: object
+      properties:
+        avd_name: { type: string }
+        proxy_id: { type: string }
+        assigned_at: { type: [string, "null"], format: date-time }
+    BridgeConfig:
+      type: object
+      properties:
+        instance: { type: string }
+        listen_host: { type: string }
+        listen_port: { type: integer }
+        upstream: { type: string }
+        mode: { type: string, enum: [http, socks5, direct] }
+        active: { type: boolean }
+    ScriptDefinition:
+      type: object
+      required: [id, name, type]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        type: { type: string, enum: [adb_shell, host_python, appium_python, appium_js, inline_shell] }
+        content: { type: string }
+        path: { type: [string, "null"] }
+        description: { type: string }
+        timeout_s: { type: integer }
+        env:
+          type: object
+          additionalProperties: { type: string }
+        targets:
+          type: array
+          items: { type: string }
+        builtin: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+    ScriptRunRequest:
+      type: object
+      required: [script_id]
+      properties:
+        script_id: { type: string }
+        instances:
+          type: array
+          items: { type: string }
+        concurrency: { type: integer, minimum: 1, maximum: 64, default: 5 }
+        timeout_s: { type: [integer, "null"] }
+        env:
+          type: object
+          additionalProperties: { type: string }
+        dry_run: { type: boolean, default: false }
+    InstanceResult:
+      type: object
+      properties:
+        instance: { type: string }
+        state: { type: string, enum: [queued, running, succeeded, failed, cancelled, timed_out] }
+        exit_code: { type: [integer, "null"] }
+        stdout: { type: string }
+        stderr: { type: string }
+        started_at: { type: [string, "null"] }
+        finished_at: { type: [string, "null"] }
+        duration_s: { type: [number, "null"] }
+        error: { type: string }
+    ScriptRun:
+      type: object
+      required: [id, script_id, state]
+      properties:
+        id: { type: string }
+        script_id: { type: string }
+        script_name: { type: string }
+        type: { type: string }
+        state: { type: string, enum: [queued, running, succeeded, failed, cancelled, timed_out] }
+        instances:
+          type: array
+          items: { type: string }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/InstanceResult" }
+        started_at: { type: [string, "null"] }
+        finished_at: { type: [string, "null"] }
+        error: { type: string }
+        dry_run: { type: boolean }
+        requested_by: { type: string }
+    AppiumStatus:
+      type: object
+      properties:
+        running: { type: boolean }
+        pid: { type: [integer, "null"] }
+        port: { type: [integer, "null"] }
+        version: { type: string }
+        drivers:
+          type: array
+          items: { type: string }
+        sessions: { type: integer }
+        url: { type: string }
+        message: { type: string }
+    CapacityInfo:
+      type: object
+      properties:
+        max_instances: { type: integer }
+        running: { type: integer }
+        deployed: { type: integer }
+        ram_available_mb: { type: integer }
+        ram_required_mb: { type: integer }
+        ports: { type: object, additionalProperties: true }
+        cpu_cores: { type: integer }
+        can_start_more: { type: integer }
+        warnings:
+          type: array
+          items: { type: string }
+    FleetRequest:
+      type: object
+      properties:
+        spec:
+          type: object
+          additionalProperties: true
+        yaml: { type: string }
+        path: { type: string }
+        prune: { type: boolean, default: false }
+        dry_run: { type: boolean, default: false }
+    PlanChange:
+      type: object
+      properties:
+        action: { type: string, enum: [create, update, delete, noop] }
+        kind: { type: string, enum: [template, instance, proxy, image] }
+        name: { type: string }
+        detail: { type: string }
+        before: { type: [object, "null"], additionalProperties: true }
+        after: { type: [object, "null"], additionalProperties: true }
+    FleetPlan:
+      type: object
+      properties:
+        spec_name: { type: string }
+        changes:
+          type: array
+          items: { $ref: "#/components/schemas/PlanChange" }
+        summary:
+          type: object
+          additionalProperties: { type: integer }
+        applyable: { type: boolean }
+        errors:
+          type: array
+          items: { type: string }
+    CheckResult:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        status: { type: string, enum: [ok, warn, fail, skip] }
+        detail: { type: string }
+        value: { type: [string, "null"] }
+    PortableStatus:
+      type: object
+      properties:
+        edition: { type: string }
+        root: { type: string }
+        portable: { type: boolean }
+        relocatable: { type: boolean }
+        host_os: { type: string }
+        host_arch: { type: string }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/CheckResult" }
+        leftovers:
+          type: array
+          items: { type: string }
+    OperationResult:
+      type: object
+      properties:
+        ok: { type: boolean }
+        message: { type: string }
+        data:
+          type: object
+          additionalProperties: true
+    Event:
+      type: object
+      required: [id, type, ts]
+      properties:
+        id: { type: string }
+        type: string
+        ts: { type: string, format: date-time }
+        payload:
+          type: object
+          additionalProperties: true
+        source: { type: string }
+        seq: { type: [integer, "null"] }

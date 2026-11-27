@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avdfleet.example/schemas/bundle.schema.json",
+  "title": "AVD Fleet Portable Bundle Manifest",
+  "description": "Manifest written to avdfleet-portable.json at the root of every portable bundle and verified on launch.",
+  "type": "object",
+  "required": ["format_version", "name", "version", "created_at", "host_os", "host_arch", "root", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "format_version": { "type": "string", "const": "1" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "host_os": { "type": "string", "enum": ["windows", "macos", "linux", "unknown"] },
+    "host_arch": { "type": "string", "enum": ["x86_64", "arm64", "unknown"] },
+    "root": { "type": "string", "description": "Root as recorded at build time; relocation updates it." },
+    "offline": { "type": "boolean" },
+    "python_version": { "type": "string" },
+    "total_bytes": { "type": "integer", "minimum": 0 },
+    "tool_versions": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "size"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "description": "POSIX-style path relative to the bundle root." },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "size": { "type": "integer", "minimum": 0 },
+          "executable": { "type": "boolean", "default": false }
+        }
+      }
+    }
+  }
+}

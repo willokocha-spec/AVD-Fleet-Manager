@@ -1,0 +1,7 @@
+# pnpm 11 settings (the old "pnpm" field in package.json is not read; the
+# legacy onlyBuiltDependencies key was replaced by allowBuilds in v11).
+# Only two dependencies need install scripts: esbuild validates/downloads its
+# platform binary, msw prints its worker hint. Everything else is script-free.
+allowBuilds:
+  esbuild: true
+  msw: true

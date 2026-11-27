@@ -1,0 +1,793 @@
+"""Unit tests for the AVD template/instance manager (A1).
+
+Hermetic: a fake ``SdkBackend`` writes real ``.ini`` files under ``tmp_path`` and
+optionally a fake store repository provides metadata persistence.  No SDK,
+emulator or network is involved (contracts/fakes-spec.md §7).
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from avdfleet.core.config import Config
+from avdfleet.core.errors import CapacityError, ConflictError, InstanceError, NotFoundError, ValidationError
+from avdfleet.core.events import EventBus, EventType
+from avdfleet.core.models import (
+    GpuMode,
+    ImageKind,
+    InstanceState,
+    OperationResult,
+    SystemImage,
+    Template,
+)
+from avdfleet.core.paths import Paths
+from avdfleet.platform.avd import AvdManagerService
+
+IMAGE_ID = "system-images;android-35;google_apis_playstore;x86_64"
+OTHER_IMAGE_ID = "system-images;android-36;google_apis;x86_64"
+FIXED_NOW = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+
+
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
+
+
+def make_image(image_id: str = IMAGE_ID, *, installed: bool = True, **overrides: Any) -> SystemImage:
+    parts = image_id.split(";")
+    api = int(parts[1].replace("android-", "")) if len(parts) == 4 else 35
+    data: dict[str, Any] = {
+        "id": image_id,
+        "api_level": api,
+        "tag": parts[2] if len(parts) == 4 else "google_apis",
+        "abi": parts[3] if len(parts) == 4 else "x86_64",
+        "kind": ImageKind.GOOGLE_APIS_PLAYSTORE,
+        "display_name": f"Android API {api} fake",
+        "installed": installed,
+    }
+    data.update(overrides)
+    return SystemImage(**data)
+
+
+class FakeImageCatalog:
+    def __init__(self, images: list[SystemImage] | None = None) -> None:
+        self.images = {image.id: image for image in (images or [make_image(), make_image(OTHER_IMAGE_ID)])}
+
+    def get_image(self, image_id: str) -> SystemImage:
+        image = self.images.get(image_id)
+        if image is None:
+            raise NotFoundError(f"image {image_id!r} not found")
+        return image
+
+    def list_images(self, **kwargs: Any) -> list[SystemImage]:
+        return list(self.images.values())
+
+
+class FakeBackend:
+    """Minimal SdkBackend that manipulates real files under ``tmp_path/avd``."""
+
+    name = "fake"
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.avd_home = root / "avd"
+        self.avd_home.mkdir(parents=True, exist_ok=True)
+        self.created: list[dict[str, Any]] = []
+        self.deleted: list[str] = []
+        self.fail_create = False
+        self.fail_delete = False
+
+    def executable(self, tool: str) -> Path:
+        return self.root / "sdk" / tool
+
+    def environment(self) -> dict[str, str]:
+        return {"ANDROID_AVD_HOME": str(self.avd_home)}
+
+    def list_device_profiles(self) -> list[dict[str, Any]]:
+        return [
+            {"id": "pixel_7", "name": "Pixel 7", "resolution": "1080x2400", "density": 420, "ram_mb": 2048},
+            {"id": "pixel_6", "name": "Pixel 6", "resolution": "1080x2400", "density": 420, "ram_mb": 2048},
+            {"id": "pixel_tablet", "name": "Pixel Tablet", "resolution": "2560x1600", "density": 320, "ram_mb": 4096},
+        ]
+
+    def list_avds(self) -> list[str]:
+        return sorted(path.stem for path in self.avd_home.glob("*.ini"))
+
+    def avd_dir(self, name: str) -> Path:
+        return self.avd_home / f"{name}.avd"
+
+    def ini_path(self, name: str) -> Path:
+        return self.avd_home / f"{name}.ini"
+
+    def create_avd(
+        self,
+        name: str,
+        image_package: str,
+        device_id: str = "pixel_7",
+        *,
+        config: dict[str, str] | None = None,
+        force: bool = False,
+    ) -> str:
+        if self.fail_create:
+            raise InstanceError("fake backend create failure")
+        if self.ini_path(name).exists() and not force:
+            raise ConflictError(f"AVD {name!r} already exists")
+        self.created.append(
+            {"name": name, "package": image_package, "device": device_id, "config": dict(config or {})}
+        )
+        directory = self.avd_dir(name)
+        directory.mkdir(parents=True, exist_ok=True)
+        values = {
+            "avd.ini.encoding": "UTF-8",
+            "image.sysdir.1": "system-images/android-35/google_apis_playstore/x86_64/",
+            "tag.id": "google_apis_playstore",
+            "abi.type": "x86_64",
+            "hw.device.name": device_id,
+            "hw.ramSize": "2048",
+            "vm.heapSize": "256",
+            "hw.cpu.ncore": "2",
+            "hw.gpu.mode": "swiftshader_indirect",
+            "PlayStore.enabled": "true",
+            "disk.dataPartition.size": "6G",
+        }
+        values.update(dict(config or {}))
+        (directory / "config.ini").write_text(
+            "# generated by FakeBackend\n"
+            + "\n".join(f"{key}={value}" for key, value in values.items())
+            + "\n",
+            encoding="utf-8",
+        )
+        self.ini_path(name).write_text(
+            "\n".join(
+                [
+                    "avd.ini.encoding=UTF-8",
+                    f"path={directory}",
+                    f"path.rel=avd/{name}.avd",
+                    "target=android-35",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return name
+
+    def delete_avd(self, name: str, *, force: bool = False) -> OperationResult:
+        if self.fail_delete:
+            raise InstanceError("fake backend delete failure")
+        import shutil
+
+        directory = self.avd_dir(name)
+        ini = self.ini_path(name)
+        if not ini.exists() and not directory.exists() and not force:
+            raise InstanceError(f"AVD {name!r} does not exist")
+        self.deleted.append(name)
+        ini.unlink(missing_ok=True)
+        shutil.rmtree(directory, ignore_errors=True)
+        return OperationResult(ok=True, message=f"deleted {name}")
+
+
+class _RepoBase:
+    def __init__(self) -> None:
+        self.rows: dict[str, Any] = {}
+
+    def list(self) -> list[Any]:
+        return list(self.rows.values())
+
+    def get(self, key: str) -> Any:
+        if key not in self.rows:
+            raise NotFoundError(f"{key!r} not found")
+        return self.rows[key]
+
+    def get_by_name(self, name: str) -> Any | None:
+        for value in self.rows.values():
+            if getattr(value, "name", None) == name:
+                return value
+        return None
+
+    def upsert(self, value: Any) -> Any:
+        key = getattr(value, "id", None) or getattr(value, "name", None)
+        self.rows[str(key)] = value
+        return value
+
+    def delete(self, key: str) -> None:
+        if key not in self.rows:
+            raise NotFoundError(f"{key!r} not found")
+        del self.rows[key]
+
+
+class FakeTemplateRepo(_RepoBase):
+    pass
+
+
+class FakeInstanceRepo(_RepoBase):
+    pass
+
+
+class FakeStore:
+    def __init__(self) -> None:
+        self.templates = FakeTemplateRepo()
+        self.instances = FakeInstanceRepo()
+
+
+class MutableClock:
+    def __init__(self, value: datetime = FIXED_NOW) -> None:
+        self.value = value
+
+    def __call__(self) -> datetime:
+        return self.value
+
+    def advance(self, seconds: int) -> None:
+        from datetime import timedelta
+
+        self.value = self.value + timedelta(seconds=seconds)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+
+def make_paths(tmp_path: Path) -> Paths:
+    return Paths(
+        root=tmp_path,
+        data_dir=tmp_path / "data",
+        config_dir=tmp_path / "config",
+        cache_dir=tmp_path / "cache",
+        log_dir=tmp_path / "logs",
+        sdk_root=tmp_path / "sdk",
+        avd_home=tmp_path / "avd",
+    ).ensure()
+
+
+def make_config(**overrides: Any) -> Config:
+    values: dict[str, Any] = {
+        "default_ram_mb": 1024,
+        "default_heap_mb": 256,
+        "default_cpu_cores": 2,
+        "max_instances": 8,
+    }
+    values.update(overrides)
+    return Config(**values)
+
+
+def make_template(**overrides: Any) -> Template:
+    values: dict[str, Any] = {
+        "id": "pixel-play-35",
+        "name": "Pixel Play 35",
+        "image_id": IMAGE_ID,
+        "device_id": "pixel_7",
+        "ram_mb": 1024,
+        "heap_mb": 256,
+        "cpu_cores": 2,
+        "gpu_mode": GpuMode.SWIFTSHADER_INDIRECT,
+        "headless": True,
+        "config": {"custom.key": "value"},
+    }
+    values.update(overrides)
+    return Template(**values)
+
+
+def make_manager(
+    tmp_path: Path,
+    *,
+    backend: FakeBackend | None = None,
+    store: Any | None = None,
+    images: Any | None = None,
+    events: Any | None = None,
+    config: Config | None = None,
+    clock: Any | None = None,
+    capacity_provider: Any | None = None,
+) -> AvdManagerService:
+    return AvdManagerService(
+        backend=backend or FakeBackend(tmp_path),
+        store=store,
+        config=config or make_config(),
+        paths=make_paths(tmp_path),
+        images=images if images is not None else FakeImageCatalog(),
+        events=events if events is not None else EventBus(),
+        clock=clock or MutableClock(),
+        capacity_provider=capacity_provider,
+    )
+
+
+@pytest.fixture()
+def manager(tmp_path: Path) -> AvdManagerService:
+    service = make_manager(tmp_path)
+    service.save_template(make_template())
+    return service
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+
+def test_template_crud_and_timestamps(manager: AvdManagerService) -> None:
+    template = manager.get_template("pixel-play-35")
+    assert template.name == "Pixel Play 35"
+    assert template.created_at is not None and template.updated_at is not None
+    clock: MutableClock = manager._clock  # type: ignore[assignment]
+    clock.advance(60)
+    updated = manager.save_template(template.model_copy(update={"ram_mb": 2048}))
+    assert updated.ram_mb == 2048
+    assert updated.created_at == template.created_at
+    assert updated.updated_at > template.updated_at  # type: ignore[operator]
+    assert manager.list_templates() and manager.list_templates()[0].id == "pixel-play-35"
+    manager.delete_template("pixel-play-35")
+    with pytest.raises(NotFoundError):
+        manager.get_template("pixel-play-35")
+    with pytest.raises(NotFoundError):
+        manager.delete_template("pixel-play-35")
+
+
+def test_template_json_fallback_persists_between_services(tmp_path: Path) -> None:
+    first = make_manager(tmp_path)
+    first.save_template(make_template())
+    stored = tmp_path / "data" / "templates.json"
+    assert stored.exists()
+    assert "pixel-play-35" in stored.read_text(encoding="utf-8")
+    second = make_manager(tmp_path)
+    assert second.get_template("pixel-play-35").name == "Pixel Play 35"
+
+
+def test_template_store_repository_is_used(tmp_path: Path) -> None:
+    store = FakeStore()
+    manager = make_manager(tmp_path, store=store)
+    saved = manager.save_template(make_template())
+    assert store.templates.rows[saved.id].name == "Pixel Play 35"
+    manager.delete_template(saved.id)
+    assert not store.templates.rows
+
+
+def test_template_duplicate_name_conflict(manager: AvdManagerService) -> None:
+    with pytest.raises(ConflictError):
+        manager.save_template(make_template(id="another-id"))
+
+
+def test_template_unknown_image_rejected(manager: AvdManagerService) -> None:
+    with pytest.raises(ValidationError):
+        manager.save_template(make_template(id="bad-image", name="Bad Image", image_id="system-images;android-99;x;y"))
+
+
+def test_template_image_not_installed_is_allowed(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, images=FakeImageCatalog([make_image(installed=False)]))
+    saved = manager.save_template(make_template())
+    assert saved.id == "pixel-play-35"
+
+
+def test_template_bad_ram_heap_cpu_rejected(manager: AvdManagerService) -> None:
+    for overrides in ({"ram_mb": 128}, {"heap_mb": 1}, {"cpu_cores": 0}):
+        candidate = make_template(id=f"bad-{list(overrides)[0]}", name=f"bad {list(overrides)[0]}", **overrides)
+        with pytest.raises(ValidationError):
+            manager.save_template(candidate)
+
+
+def test_template_unknown_device_rejected(manager: AvdManagerService) -> None:
+    with pytest.raises(ValidationError):
+        manager.save_template(
+            make_template(id="bad-device", name="Bad Device", device_id="not_a_phone")
+        )
+
+
+def test_template_device_canonicalised(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    saved = manager.save_template(make_template(device_id="Pixel 7"))
+    assert saved.device_id == "pixel_7"
+
+
+def test_template_secret_config_rejected(manager: AvdManagerService) -> None:
+    with pytest.raises(ValidationError):
+        manager.save_template(
+            make_template(id="secret", name="Secret", config={"proxy.password": "hunter2"})
+        )
+
+
+def test_list_device_profiles(manager: AvdManagerService) -> None:
+    profiles = manager.list_device_profiles()
+    assert {profile.id for profile in profiles} >= {"pixel_7", "pixel_6", "pixel_tablet"}
+
+
+# ---------------------------------------------------------------------------
+# Instances: create / list / delete
+# ---------------------------------------------------------------------------
+
+
+def test_create_instance_writes_config_and_metadata(
+    manager: AvdManagerService, tmp_path: Path
+) -> None:
+    info = manager.create_instance("pixel-play-35", "avd-01")
+    assert info.name == "avd-01"
+    assert info.state is InstanceState.STOPPED
+    assert info.template_id == "pixel-play-35"
+    assert info.image_id == IMAGE_ID
+    backend: FakeBackend = manager.backend  # type: ignore[assignment]
+    assert backend.created[0]["name"] == "avd-01"
+    assert backend.created[0]["package"] == IMAGE_ID
+    config_text = (tmp_path / "avd" / "avd-01.avd" / "config.ini").read_text(encoding="utf-8")
+    assert "hw.ramSize=1024" in config_text
+    assert "hw.device.name=pixel_7" in config_text
+    assert "# generated by FakeBackend" in config_text
+    assert manager.get_instance("avd-01").template_id == "pixel-play-35"
+    assert [item.name for item in manager.list_instances()] == ["avd-01"]
+
+
+def test_create_instance_emits_event(manager: AvdManagerService) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    bus: EventBus = manager._sink.bus  # type: ignore[assignment]
+    created = [event for event in bus.history() if event.type == EventType.INSTANCE_CREATED]
+    assert created and created[0].payload["instance"] == "avd-01"
+
+
+def test_create_instance_name_collision(manager: AvdManagerService) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    with pytest.raises(ConflictError):
+        manager.create_instance("pixel-play-35", "avd-01")
+
+
+def test_create_instance_invalid_name(manager: AvdManagerService) -> None:
+    with pytest.raises(ValidationError):
+        manager.create_instance("pixel-play-35", "bad name!")
+
+
+def test_create_instance_unknown_template(manager: AvdManagerService) -> None:
+    with pytest.raises(NotFoundError):
+        manager.create_instance("missing-template", "avd-01")
+
+
+def test_create_instance_requires_installed_image(tmp_path: Path) -> None:
+    manager = make_manager(
+        tmp_path, images=FakeImageCatalog([make_image(installed=False)])
+    )
+    manager.save_template(make_template())
+    with pytest.raises(ValidationError):
+        manager.create_instance("pixel-play-35", "avd-01")
+    backend: FakeBackend = manager.backend  # type: ignore[assignment]
+    assert backend.created == []
+
+
+def test_create_instance_overrides_applied(
+    manager: AvdManagerService, tmp_path: Path
+) -> None:
+    info = manager.create_instance(
+        "pixel-play-35",
+        "avd-01",
+        {"ram_mb": 4096, "config": {"custom.override": "yes"}, "headless": False},
+    )
+    assert info.config["hw.ramSize"] == "4096"
+    assert info.config["custom.override"] == "yes"
+    config_text = (tmp_path / "avd" / "avd-01.avd" / "config.ini").read_text(encoding="utf-8")
+    assert "hw.ramSize=4096" in config_text
+
+
+def test_create_instance_unknown_override_rejected(manager: AvdManagerService) -> None:
+    with pytest.raises(ValidationError):
+        manager.create_instance("pixel-play-35", "avd-01", {"warp_speed": True})
+
+
+def test_create_instance_backend_failure_rolls_back(manager: AvdManagerService) -> None:
+    backend: FakeBackend = manager.backend  # type: ignore[assignment]
+    backend.fail_create = True
+    with pytest.raises(InstanceError):
+        manager.create_instance("pixel-play-35", "avd-01")
+    assert manager.list_instances() == []
+
+
+def test_create_instance_from_image(manager: AvdManagerService) -> None:
+    info = manager.create_instance_from_image(OTHER_IMAGE_ID, "oobe-01")
+    assert info.name == "oobe-01"
+    assert info.image_id == OTHER_IMAGE_ID
+    assert info.config["hw.ramSize"] == "1024"
+    assert manager.get_instance("oobe-01").image_id == OTHER_IMAGE_ID
+
+
+def test_create_instance_from_image_object_matches_oobe_call(manager: AvdManagerService) -> None:
+    """O1 calls ``provisioner(image, avd_name, image_id=..., device_id=...)``."""
+    image = make_image(OTHER_IMAGE_ID, installed=True)
+    info = manager.create_instance_from_image(
+        image, "oobe-02", image_id=image.id, device_id="pixel_7"
+    )
+    assert info.name == "oobe-02"
+    assert info.image_id == OTHER_IMAGE_ID
+    assert info.device_id == "pixel_7"
+
+
+def test_create_instance_from_image_keyword_only_oobe_fallback(
+    manager: AvdManagerService,
+) -> None:
+    """O1's keyword-only fallback: image_id/name/device_id/config/overrides."""
+    info = manager.create_instance_from_image(
+        image_id=OTHER_IMAGE_ID,
+        name="oobe-03",
+        device_id="pixel_7",
+        config={},
+        overrides={},
+    )
+    assert info.name == "oobe-03"
+    assert info.image_id == OTHER_IMAGE_ID
+
+
+def test_delete_instance_removes_files_and_metadata(manager: AvdManagerService, tmp_path: Path) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    avd_dir = tmp_path / "avd" / "avd-01.avd"
+    assert avd_dir.exists()
+    manager.delete_instance("avd-01")
+    assert not avd_dir.exists()
+    assert not (tmp_path / "avd" / "avd-01.ini").exists()
+    with pytest.raises(NotFoundError):
+        manager.get_instance("avd-01")
+
+
+def test_delete_instance_metadata_only(manager: AvdManagerService, tmp_path: Path) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    manager.delete_instance("avd-01", delete_files=False)
+    assert (tmp_path / "avd" / "avd-01.avd").exists()
+    assert manager.list_instances()  # backend AVD still listed
+
+
+def test_delete_missing_instance(manager: AvdManagerService) -> None:
+    with pytest.raises(NotFoundError):
+        manager.delete_instance("nope")
+
+
+def test_delete_running_instance_conflict(tmp_path: Path) -> None:
+    store = FakeStore()
+    manager = make_manager(tmp_path, store=store)
+    manager.save_template(make_template())
+    manager.create_instance("pixel-play-35", "avd-01")
+    stored = store.instances.rows["avd-01"]
+    store.instances.upsert(
+        stored.model_copy(update={"state": InstanceState.RUNNING, "pid": os.getpid()})
+    )
+    with pytest.raises(ConflictError):
+        manager.delete_instance("avd-01")
+
+
+# ---------------------------------------------------------------------------
+# Bulk deploy
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_deploy_generates_names(manager: AvdManagerService) -> None:
+    created = manager.bulk_deploy("pixel-play-35", count=3, prefix="fleet")
+    assert [info.name for info in created] == ["fleet-01", "fleet-02", "fleet-03"]
+    assert len(manager.list_instances()) == 3
+
+
+def test_bulk_deploy_skips_existing_names(manager: AvdManagerService) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    created = manager.bulk_deploy("pixel-play-35", count=2, prefix="avd")
+    assert [info.name for info in created] == ["avd-02", "avd-03"]
+
+
+def test_bulk_deploy_capacity_rejection(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path, config=make_config(max_instances=2))
+    manager.save_template(make_template())
+    manager.create_instance("pixel-play-35", "avd-01")
+    with pytest.raises(CapacityError):
+        manager.bulk_deploy("pixel-play-35", count=2)
+    assert len(manager.list_instances()) == 1
+
+
+def test_bulk_deploy_invalid_count(manager: AvdManagerService) -> None:
+    for count in (0, 65):
+        with pytest.raises(ValidationError):
+            manager.bulk_deploy("pixel-play-35", count=count)
+
+
+# ---------------------------------------------------------------------------
+# Clone
+# ---------------------------------------------------------------------------
+
+
+def test_clone_copies_directory_and_rewrites_paths(
+    manager: AvdManagerService, tmp_path: Path
+) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    source_dir = tmp_path / "avd" / "avd-01.avd"
+    (source_dir / "marker.txt").write_text("copied", encoding="utf-8")
+    manager.update_config("avd-01", {"custom.source.path": str(source_dir)})
+    clone = manager.clone_instance("avd-01", "avd-02")
+    target_dir = tmp_path / "avd" / "avd-02.avd"
+    assert clone.name == "avd-02"
+    assert (target_dir / "marker.txt").read_text(encoding="utf-8") == "copied"
+    config_text = (target_dir / "config.ini").read_text(encoding="utf-8")
+    assert str(source_dir) not in config_text
+    from avdfleet.platform.avd.configini import read_config
+
+    assert read_config(target_dir / "config.ini").get("custom.source.path") == str(target_dir)
+    ini = (tmp_path / "avd" / "avd-02.ini").read_text(encoding="utf-8")
+    from avdfleet.platform.avd.configini import read_config
+
+    ini_values = read_config(tmp_path / "avd" / "avd-02.ini")
+    assert ini_values.get("path") == str(target_dir).replace("\\", "/")
+    assert "path.rel=avd/avd-02.avd" in ini
+    assert manager.get_instance("avd-02").template_id == "pixel-play-35"
+
+
+def test_clone_collision(manager: AvdManagerService) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    manager.create_instance("pixel-play-35", "avd-02")
+    with pytest.raises(ConflictError):
+        manager.clone_instance("avd-01", "avd-02")
+
+
+def test_clone_missing_source_directory(manager: AvdManagerService, tmp_path: Path) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    import shutil
+
+    shutil.rmtree(tmp_path / "avd" / "avd-01.avd")
+    with pytest.raises(NotFoundError):
+        manager.clone_instance("avd-01", "avd-02")
+
+
+# ---------------------------------------------------------------------------
+# config.ini update
+# ---------------------------------------------------------------------------
+
+
+def test_update_config_typed_and_backup(manager: AvdManagerService, tmp_path: Path) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    info = manager.update_config("avd-01", {"hw.ramSize": "3072", "hw.cpu.ncore": "4"})
+    assert info.config["hw.ramSize"] == "3072"
+    assert info.config["hw.cpu.ncore"] == "4"
+    assert (tmp_path / "avd" / "avd-01.avd" / "config.ini.bak").exists()
+    assert "# generated by FakeBackend" in (
+        tmp_path / "avd" / "avd-01.avd" / "config.ini"
+    ).read_text(encoding="utf-8")
+
+
+def test_update_config_dry_run_does_not_write(manager: AvdManagerService, tmp_path: Path) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    before = (tmp_path / "avd" / "avd-01.avd" / "config.ini").read_text(encoding="utf-8")
+    info = manager.update_config("avd-01", {"hw.ramSize": "4096"}, dry_run=True)
+    assert info.config["hw.ramSize"] == "4096"
+    assert (tmp_path / "avd" / "avd-01.avd" / "config.ini").read_text(encoding="utf-8") == before
+    assert not (tmp_path / "avd" / "avd-01.avd" / "config.ini.bak").exists()
+
+
+def test_update_config_invalid_value(manager: AvdManagerService) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    with pytest.raises(ValidationError):
+        manager.update_config("avd-01", {"hw.ramSize": "nope"})
+
+
+def test_update_config_missing_instance(manager: AvdManagerService) -> None:
+    with pytest.raises(NotFoundError):
+        manager.update_config("nope", {"hw.ramSize": "2048"})
+
+
+def test_update_config_missing_file(manager: AvdManagerService, tmp_path: Path) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    (tmp_path / "avd" / "avd-01.avd" / "config.ini").unlink()
+    with pytest.raises(InstanceError):
+        manager.update_config("avd-01", {"hw.ramSize": "2048"})
+    issues = manager.inspect_config("avd-01")
+    assert any(issue.is_error for issue in issues)
+
+
+# ---------------------------------------------------------------------------
+# YAML
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_export_import_roundtrip(tmp_path: Path) -> None:
+    first = make_manager(tmp_path)
+    first.save_template(make_template(config={"custom.key": "value"}))
+    first.create_instance("pixel-play-35", "avd-01")
+    content = first.export_yaml()
+    assert "templates:" in content and "instances:" in content
+    assert "avd-01" in content
+    first.delete_instance("avd-01")
+    second = make_manager(tmp_path)
+    created = second.import_yaml(content)
+    assert [info.name for info in created] == ["avd-01"]
+    assert second.get_instance("avd-01").template_id == "pixel-play-35"
+
+
+def test_yaml_export_contains_no_credentials(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    manager.save_template(
+        make_template(config={"note": "http://alice:hunter2@proxy.local:8080"})
+    )
+    content = manager.export_yaml()
+    assert "hunter2" not in content
+    assert "***" in content
+
+
+def test_yaml_import_rejects_secrets(manager: AvdManagerService) -> None:
+    content = """
+version: "1"
+templates:
+  - id: t1
+    name: T1
+    image_id: system-images;android-35;google_apis_playstore;x86_64
+    config:
+      password: hunter2
+"""
+    with pytest.raises(ValidationError):
+        manager.import_yaml(content)
+
+
+def test_yaml_import_rejects_unknown_version(manager: AvdManagerService) -> None:
+    with pytest.raises(ValidationError):
+        manager.import_yaml('version: "99"\ntemplates: []\n')
+
+
+def test_yaml_import_unknown_template(manager: AvdManagerService) -> None:
+    content = """
+version: "1"
+instances:
+  - name: avd-01
+    template_id: missing
+"""
+    with pytest.raises(ValidationError):
+        manager.import_yaml(content)
+
+
+def test_yaml_import_skips_existing_instance(manager: AvdManagerService) -> None:
+    manager.create_instance("pixel-play-35", "avd-01")
+    content = manager.export_yaml()
+    assert manager.import_yaml(content) == []
+
+
+# ---------------------------------------------------------------------------
+# Capacity hook
+# ---------------------------------------------------------------------------
+
+
+def test_capacity_provider_used_for_deploy_limit(tmp_path: Path) -> None:
+    manager = make_manager(
+        tmp_path,
+        config=make_config(max_instances=64),
+        capacity_provider=lambda: {"deployed": 64, "max_instances": 64, "running": 0},
+    )
+    manager.save_template(make_template())
+    with pytest.raises(CapacityError):
+        manager.create_instance("pixel-play-35", "avd-01")
+    assert manager.capacity()["deployed"] == 64
+
+# ---------------------------------------------------------------------------
+# Integration: the real legacy SdkBackend against tests/fakes executables
+# (optional; all other tests in this module are hermetic fakes-in-process)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.environ.get("AVDFLEET_FAKE_INTEGRATION") != "1",
+    reason="executable-fake integration test; set AVDFLEET_FAKE_INTEGRATION=1 to run",
+)
+@pytest.mark.integration
+def test_legacy_backend_creates_configures_and_deletes_avd(fake_env, tmp_path: Path) -> None:
+    """A1 against the frozen executable fakes and S1's legacy backend."""
+    from avdfleet.core.models import SdkPaths
+    from avdfleet.platform.sdk.legacy.backend import LegacySdkBackend
+
+    config = make_config()
+    backend = LegacySdkBackend(
+        config,
+        SdkPaths(sdk_root=str(fake_env.sdk_root), avd_home=str(fake_env.avd_home)),
+    )
+    manager = AvdManagerService(
+        backend=backend,
+        config=config,
+        paths=make_paths(tmp_path),
+        images=FakeImageCatalog([make_image(installed=True)]),
+    )
+    manager.save_template(make_template())
+    info = manager.create_instance("pixel-play-35", "e2e-avd")
+    assert info.name == "e2e-avd"
+    assert "e2e-avd" in backend.list_avds()
+    assert manager.get_instance("e2e-avd").config["hw.ramSize"] == "1024"
+    updated = manager.update_config("e2e-avd", {"hw.ramSize": "2048"})
+    assert updated.config["hw.ramSize"] == "2048"
+    assert (fake_env.avd_home / "e2e-avd.avd" / "config.ini.bak").exists()
+    manager.clone_instance("e2e-avd", "e2e-clone")
+    assert (fake_env.avd_home / "e2e-clone.avd" / "config.ini").exists()
+    assert (fake_env.avd_home / "e2e-clone.ini").exists()
+    manager.delete_instance("e2e-avd")
+    assert "e2e-avd" not in backend.list_avds()

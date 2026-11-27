@@ -1,0 +1,78 @@
+"""Portable bundle build/verify/inspect."""
+
+from __future__ import annotations
+
+from .builder import PortableBundleBuilder, default_portable_config
+from .cache import (
+    COMPONENTS,
+    OPTIONAL_COMPONENTS,
+    REQUIRED_COMPONENTS,
+    SourcePlan,
+    component_present,
+    resolve_sources,
+)
+from .manifest import (
+    BUNDLE_COMPONENT_DIRS,
+    IGNORED_FILE_NAMES,
+    IGNORED_PREFIXES,
+    IGNORED_SUFFIXES,
+    MARKER_NAME,
+    RUNTIME_DIRS,
+    build_manifest,
+    entry_executable,
+    file_entry,
+    is_ignored,
+    iter_bundle_files,
+    manifest_path,
+    manifest_payload,
+    manifest_summary,
+    read_manifest,
+    write_manifest,
+)
+from .verify import (
+    RELOCATABLE_PREFIXES,
+    BundleInspection,
+    BundleVerificationError,
+    VerifyIssue,
+    VerifyReport,
+    format_verify_report,
+    inspect_bundle,
+    validate_entry_path,
+    verify_bundle,
+)
+
+__all__ = [
+    "BUNDLE_COMPONENT_DIRS",
+    "COMPONENTS",
+    "IGNORED_FILE_NAMES",
+    "IGNORED_PREFIXES",
+    "IGNORED_SUFFIXES",
+    "MARKER_NAME",
+    "OPTIONAL_COMPONENTS",
+    "RELOCATABLE_PREFIXES",
+    "REQUIRED_COMPONENTS",
+    "RUNTIME_DIRS",
+    "BundleInspection",
+    "BundleVerificationError",
+    "PortableBundleBuilder",
+    "SourcePlan",
+    "VerifyIssue",
+    "VerifyReport",
+    "build_manifest",
+    "component_present",
+    "default_portable_config",
+    "entry_executable",
+    "file_entry",
+    "format_verify_report",
+    "inspect_bundle",
+    "is_ignored",
+    "iter_bundle_files",
+    "manifest_path",
+    "manifest_payload",
+    "manifest_summary",
+    "read_manifest",
+    "resolve_sources",
+    "validate_entry_path",
+    "verify_bundle",
+    "write_manifest",
+]
