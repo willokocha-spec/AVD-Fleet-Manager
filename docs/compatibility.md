@@ -141,7 +141,8 @@ These are recorded exactly as the final report must state them:
 ## Editions and packaging
 
 - Installed edition: Python 3.11–3.13 (`requires-python = ">=3.11,<3.14"`),
-  `uv tool install avdfleet`, one HTTP daemon serving the built UI. One Python
+  `uv tool install` from a wheel built in the checkout (the package is not on
+  PyPI yet), one HTTP daemon serving the built UI. One Python
   package, one version (`0.1.0`).
 - Portable edition: one bundle per host OS/arch; no venv shipped; no Google
   components redistributed; prepared-cache build in v0.1 (no download step by

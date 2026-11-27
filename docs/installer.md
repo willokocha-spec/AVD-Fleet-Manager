@@ -8,8 +8,13 @@ AVD Fleet has two layers: the thin **bootstrap** scripts
 engine and the flags both layers accept.
 
 ```
-bootstrap -> uv -> uv tool install avdfleet -> avdfleet install -> avdfleet doctor
+bootstrap -> uv -> uv tool install <avdfleet package spec> -> avdfleet install -> avdfleet doctor
 ```
+
+The package is not published on PyPI yet, so `uv tool install avdfleet` cannot
+resolve from the index. Build a wheel from the checkout and pass it through
+`AVDFLEET_PACKAGE_SPEC` (the bootstrap validates a local path and forces a
+reinstall), or install the wheel directly with `uv tool install`.
 
 ## What gets installed
 

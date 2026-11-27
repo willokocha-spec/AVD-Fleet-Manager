@@ -32,6 +32,9 @@ xcode-select -p          # should print a path after installation
 
 ```bash
 cd /path/to/Android        # repository checkout
+# the package is not on PyPI yet: build a wheel and point the bootstrap at it
+uv build --wheel
+export AVDFLEET_PACKAGE_SPEC="$PWD/dist/avdfleet-0.1.0-py3-none-any.whl"
 chmod +x bootstrap/install.sh
 ./bootstrap/install.sh --accept-android-sdk-licenses --yes
 ```

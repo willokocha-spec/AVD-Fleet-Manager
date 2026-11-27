@@ -47,8 +47,15 @@ Get-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform
 From the repository checkout, in an elevated PowerShell:
 
 ```powershell
+# the package is not on PyPI yet: build a wheel and point the bootstrap at it
+uv build --wheel
+$env:AVDFLEET_PACKAGE_SPEC = "$PWD\dist\avdfleet-0.1.0-py3-none-any.whl"
 powershell -ExecutionPolicy Bypass -File .\bootstrap\install.ps1 -AcceptAndroidSdkLicenses -Yes
 ```
+
+`AVDFLEET_PACKAGE_SPEC` also accepts a git URL or a pinned version; a local path
+that does not exist is rejected before anything is installed
+(see [bootstrap/README.md](../bootstrap/README.md)).
 
 What happens, in order: the bootstrap validates flags and the host, finds or
 installs `uv` (HTTPS only, checksum verified when `UV_INSTALLER_SHA256` is set),

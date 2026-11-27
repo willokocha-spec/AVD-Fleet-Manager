@@ -3,6 +3,14 @@
 **Build date:** 2026-11-26 · **Host:** Windows 11 VM (no hardware virtualisation)
 · **Edition:** installed + portable (one engine)
 
+> **Superseded for acceptance purposes (2026-11-27).** This report describes the
+> original build host, which had no hypervisor. A later Windows 11 / WHPX host
+> produced real emulator evidence - AVD boots, OOBE detection, proxy isolation and
+> Appium sessions - recorded in
+> [docs/live-acceptance-2026-11-27.md](docs/live-acceptance-2026-11-27.md), with the
+> current item-by-item status in [docs/acceptance.md](docs/acceptance.md). The body
+> below is kept as the historical build record.
+
 > **Evidence caveat, read first.** This build host has **no usable hypervisor**
 > (WHPX/KVM/HVF all unavailable) and no admin permission to install the Android SDK.
 > No real emulator was booted. Every emulator-facing acceptance item below is marked
