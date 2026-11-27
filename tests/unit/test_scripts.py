@@ -271,6 +271,12 @@ def test_adb_shell_fan_out_uses_serial_and_never_a_host_shell(
         assert [result.instance for result in run.results] == ["avd-01", "avd-02"]
         assert all(result.exit_code == 0 for result in run.results)
         assert "hello-fleet" in run.results[0].stdout
+        # Concurrent fake adb processes append their events; on Windows the
+        # second file handle can still be flushing right after the run returns.
+        assert _wait_for(
+            lambda: len(fake_tools.adb_log.read_text(encoding="utf-8").splitlines()) >= 2,
+            timeout=10.0,
+        )
         events = [
             json.loads(line)
             for line in fake_tools.adb_log.read_text(encoding="utf-8").splitlines()

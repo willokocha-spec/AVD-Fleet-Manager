@@ -184,8 +184,11 @@ class RootReplacer:
     def _render_root(self, style: str) -> str:
         if style == "escaped":
             return _escapedify(self.new_root)
-        if style == "windows":
+        if os.name == "nt" and style == "windows":
             return _windowsify(self.new_root)
+        # A POSIX bundle must contain POSIX absolute paths even if the recorded
+        # old root used Windows separators (for example a bundle prepared on a
+        # different host).  Windows keeps its native/escaped spelling.
         return _posixify(self.new_root)
 
     def matches(self, text: str) -> bool:

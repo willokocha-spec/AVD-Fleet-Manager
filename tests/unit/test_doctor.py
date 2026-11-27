@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +26,7 @@ from avdfleet.core.models import (
     HostOS,
 )
 from avdfleet.core.paths import Paths
+from avdfleet.core.ports import find_free_even_port, find_free_port
 from avdfleet.platform import doctor as doctor_module
 from avdfleet.platform.doctor import (
     CHECK_IDS,
@@ -71,30 +71,18 @@ def _make_tool_bin(tmp_path: Path) -> Path:
 
 
 def _free_ports() -> tuple[int, int, int]:
-    """Return ``(api_port, appium_port, console_port)`` that are free right now."""
-    sockets: list[socket.socket] = []
-    try:
-        ports: list[int] = []
-        for _ in range(10):
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(("127.0.0.1", 0))
-            sockets.append(sock)
-            ports.append(int(sock.getsockname()[1]))
-        console = next(
-            (
-                port
-                for port in ports
-                if port % 2 == 0 and port + 1 in ports and 1024 <= port <= 65530
-            ),
-            None,
-        )
-        if console is None:
-            raise RuntimeError("could not reserve a free console port pair")
-        remaining = [port for port in ports if port not in (console, console + 1)]
-        return remaining[0], remaining[1], console
-    finally:
-        for sock in sockets:
-            sock.close()
+    """Return ``(api_port, appium_port, console_port)`` that are free right now.
+
+    Console ports must be even and the following odd port must also be free.
+    The previous approach reserved ten random ephemeral sockets and hoped that
+    two adjacent ports happened to be among them, which is flaky on Linux/macOS.
+    """
+    console = find_free_even_port(24000, 30000)
+    api_port = find_free_port(30001, 40000)
+    appium_port = find_free_port(40001, 50000)
+    if console is None or api_port is None or appium_port is None:
+        raise RuntimeError("could not reserve free test ports")
+    return api_port, appium_port, console
 
 
 def _config_with_free_ports(sdk: Path, tmp_path: Path) -> Config:

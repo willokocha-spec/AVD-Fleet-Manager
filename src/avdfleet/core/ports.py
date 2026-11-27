@@ -8,6 +8,7 @@ probes the host before handing out a port.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 from collections.abc import Iterable
@@ -21,6 +22,14 @@ def is_port_free(port: int, host: str = "127.0.0.1") -> bool:
     if not 1 <= port <= 65535:
         return False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # A recently closed listener can leave accepted connections in
+        # TIME_WAIT on the same local port.  POSIX servers (uvicorn, Appium,
+        # the emulator) set SO_REUSEADDR themselves, so treat such a port as
+        # reusable instead of reporting it busy for a minute after stop().
+        # Do not set it on Windows: there SO_REUSEADDR can let a probe bind
+        # over a live listener and would hide a genuinely busy port.
+        if os.name != "nt":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
         except OSError:

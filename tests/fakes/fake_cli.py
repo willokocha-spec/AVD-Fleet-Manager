@@ -2212,7 +2212,13 @@ def python_tool(args: list[str]) -> int:
         out(version)
         return EXIT_OK
     real_path = Path(real)
-    if real_path.stem.lower() in TOOL_NAMES or not real_path.exists():
+    fake_home = fake_runtime.env_value("AVDFLEET_FAKE_HOME")
+    fake_bin = Path(fake_home) / "bin" if fake_home else None
+    try:
+        in_fake_bin = fake_bin is not None and real_path.resolve().parent == fake_bin.resolve()
+    except OSError:  # pragma: no cover - defensive
+        in_fake_bin = False
+    if in_fake_bin or not real_path.exists():
         raise ToolFailure(f"fake python: real interpreter unavailable ({real})")
     try:
         os.execv(str(real_path), [str(real_path), *args])
