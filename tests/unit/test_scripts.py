@@ -58,7 +58,7 @@ FAKE_ADB_SOURCE = dedent(
     args = sys.argv[1:]
     log_path = os.environ.get("FAKE_ADB_LOG")
     if log_path:
-        payload = (json.dumps({"argv": args}) + "\n").encode("utf-8")
+        payload = (json.dumps({"argv": args}) + "\\n").encode("utf-8")
         # Concurrent fan-out processes append to the same log on Windows.  A
         # single O_APPEND write avoids the per-process text-buffer race that
         # could silently drop one event.
