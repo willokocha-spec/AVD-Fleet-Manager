@@ -1,0 +1,107 @@
+name: CI debug snapshot
+
+# Temporary diagnostics workflow. It runs the failing test commands, writes their
+# output into dedicated branches (ci-debug-linux / ci-debug-macos / ci-debug-windows)
+# so the maintainers can inspect failures without secret credentials. Removed after
+# the cross-platform fixes land.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  debug-linux:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Run pytest and save log
+        run: |
+          set +e
+          python -m pytest -m "not emulator" -q --maxfail=20 > /tmp/pytest-linux.log 2>&1
+          echo "pytest_exit=$?" >> /tmp/pytest-linux.log
+          python -m pytest bootstrap/test_bootstrap.py -q >> /tmp/pytest-linux.log 2>&1
+          echo "bootstrap_exit=$?" >> /tmp/pytest-linux.log
+          cat /tmp/pytest-linux.log
+          cp /tmp/pytest-linux.log "${RUNNER_TEMP}/ci-log.txt"
+      - name: Publish log branch
+        if: always()
+        run: |
+          cp "${RUNNER_TEMP}/ci-log.txt" ci-debug-linux.log
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan ci-debug-linux
+          git rm -rf . >/dev/null 2>&1 || true
+          cp "${RUNNER_TEMP}/ci-log.txt" ci-debug-linux.log
+          git add ci-debug-linux.log
+          git commit -m "ci debug: linux" >/dev/null
+          git push -f origin ci-debug-linux
+
+  debug-macos:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Run pytest and save log
+        run: |
+          set +e
+          python -m pytest -m "not emulator" -q --maxfail=20 > /tmp/pytest-macos.log 2>&1
+          echo "pytest_exit=$?" >> /tmp/pytest-macos.log
+          python -m pytest bootstrap/test_bootstrap.py -q >> /tmp/pytest-macos.log 2>&1
+          echo "bootstrap_exit=$?" >> /tmp/pytest-macos.log
+          cat /tmp/pytest-macos.log
+          cp /tmp/pytest-macos.log "${RUNNER_TEMP}/ci-log.txt"
+      - name: Publish log branch
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan ci-debug-macos
+          git rm -rf . >/dev/null 2>&1 || true
+          cp "${RUNNER_TEMP}/ci-log.txt" ci-debug-macos.log
+          git add ci-debug-macos.log
+          git commit -m "ci debug: macos" >/dev/null
+          git push -f origin ci-debug-macos
+
+  debug-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Run pytest and save log
+        shell: pwsh
+        run: |
+          python -m pytest -m "not emulator" -q --maxfail=20 *> pytest-windows.log
+          "pytest_exit=$LASTEXITCODE" | Out-File -Append pytest-windows.log
+          python -m pytest bootstrap/test_bootstrap.py -q *>> pytest-windows.log
+          "bootstrap_exit=$LASTEXITCODE" | Out-File -Append pytest-windows.log
+          Get-Content pytest-windows.log
+          Copy-Item pytest-windows.log "$env:RUNNER_TEMP\ci-log.txt"
+      - name: Publish log branch
+        if: always()
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan ci-debug-windows
+          git rm -rf . 2>$null
+          Copy-Item "$env:RUNNER_TEMP\ci-log.txt" ci-debug-windows.log
+          git add ci-debug-windows.log
+          git commit -m "ci debug: windows" | Out-Null
+          git push -f origin ci-debug-windows
