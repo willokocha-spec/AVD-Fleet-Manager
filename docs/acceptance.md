@@ -33,7 +33,7 @@ Legend: **REAL** = real emulator/host evidence; **FAKES** = process-boundary fak
 | 5 | Custom image imported from a directory boots an AVD | **BLOCKED end-to-end; FAKES import** | `tests/unit/test_images.py` (layout/validation/staging/registration); research R6 import algorithm | No real custom image boot |
 | 6 | `avdfleet apply -f fleet.yaml` rebuilds the fleet on a clean host | **FAKES PARTIAL** | `tests/integration/test_fleetspec.py` (41 tests); selftest fleet plan/dry-run; CLI/API fleet tests | Not run on a clean real host; no real apply/boot |
 | 7 | Portable: `bundle --offline`, fresh machine, GUI offline, boot to OOBE, proxy script, relocation/drive letter, filesystem diff, FAT32 refused, noexec detected | **FAKES/PARTIAL** | `tests/portable/` (169 passed, 1 skipped symlink); bundle manifest schema; launcher/relocation/checks tests; Windows ADS unblock executed for real | No real bundle from licensed SDK cache, no fresh-machine launch, no real removable-media relocation or filesystem diff. Google licence forbids shipping Play components in the bundle. |
-| 8 | Lint, type checks, unit/contract/integration/portable/UI tests green on Linux/macOS/Windows; real-emulator E2E where allowed | **PARTIAL PASS** | On this Windows host: ruff clean, mypy clean (182 files), Python suite green, UI Vitest 68/68, typecheck/lint/build green; CI workflows supplied but not executed; `tests/e2e/test_real_emulator.py` skips cleanly without WHPX/KVM/HVF; real emulator BLOCKED | No Linux/macOS execution, no CI run, no real-emulator E2E |
+| 8 | Lint, type checks, unit/contract/integration/portable/UI tests green on Linux/macOS/Windows; real-emulator E2E where allowed | **PASS (static/unit), real E2E BLOCKED** | GitHub Actions 45931852696: ruff, mypy, pytest, UI typecheck/lint/test/build, docs links, installer containers green on Ubuntu, macOS ARM64 and Windows; `tests/e2e/test_real_emulator.py` skips cleanly without WHPX/KVM/HVF; real emulator BLOCKED on this host | Real-emulator E2E not executed; fake-only tests |
 | 9 | Docs complete | **DELIVERED** | `docs/` (quickstarts, installer, portable, proxy, OOBE, scripting, fleetspec, API, CLI, compatibility, testing, troubleshooting, acceptance), README, FINAL_REPORT, 12 GUI screenshots | Real-host screenshots and validation remain for an accelerated machine |
 
 ## Final verification snapshot (integrated tree, 2026-11-26)
@@ -53,7 +53,7 @@ Legend: **REAL** = real emulator/host evidence; **FAKES** = process-boundary fak
 | Docs links | stdlib link-existence script | **PASS** - all relative links resolve |
 | Selftest (fakes) | `python -m avdfleet selftest --e2e --fakes --fast --count 1 --json` | **PASS (fakes)** - 17 checks: 15 pass, 0 fail, 2 skip (`custom_image` not supplied, portable N/A); JSON `ok: true`, `exit_code: 0`, evidence labelled `fakes` |
 | Selftest (real) | `python -m avdfleet selftest --e2e` | **BLOCKED** - no hypervisor; emulator checks report SKIP, exit 0 unless `--require-acceleration` |
-| CI | GitHub Actions workflows | **NOT EXECUTED** - no git/GitHub remote on this host |
+| CI | GitHub Actions workflows | **PASS** — [run 45931852696](https://github.com/willokocha-spec/AVD-Fleet-Manager/actions/runs/45931852696): Python on Ubuntu/macOS/Windows, UI, installer containers, docs links, best-effort KVM |
 
 ### Selftest fakes detail
 
