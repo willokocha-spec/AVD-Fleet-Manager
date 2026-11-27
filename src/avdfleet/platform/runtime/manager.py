@@ -113,16 +113,16 @@ def _pid_alive(pid: int | None) -> bool:
         try:
             import ctypes
 
-            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # type: ignore[attr-defined]
             if not handle:
                 return False
             try:
                 exit_code = ctypes.c_ulong()
-                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):  # type: ignore[attr-defined]
                     return False
                 return exit_code.value == 259
             finally:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             return False
     try:

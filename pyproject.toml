@@ -117,6 +117,11 @@ ignore = ["E501", "SIM105", "B008"]
 
 [tool.mypy]
 python_version = "3.12"
+# AVD Fleet intentionally contains Windows-specific host probes (ctypes.windll,
+# winreg, job objects).  Type-check against the Windows typeshed everywhere so
+# the Linux/macOS CI runners do not report false "windll missing" errors; the
+# runtime branches remain platform-guarded.
+platform = "win32"
 files = ["src/avdfleet"]
 check_untyped_defs = true
 ignore_missing_imports = true

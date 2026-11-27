@@ -519,15 +519,15 @@ def process_alive(pid: int) -> bool:
     if os.name == "nt":  # pragma: no cover - Windows only
         import ctypes
 
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # type: ignore[attr-defined]  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
             return False
         try:
             code = ctypes.c_ulong()
-            ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))  # type: ignore[attr-defined]
             return code.value == 259  # STILL_ACTIVE
         finally:
-            ctypes.windll.kernel32.CloseHandle(handle)
+            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
     try:
         os.kill(pid, 0)
     except OSError:

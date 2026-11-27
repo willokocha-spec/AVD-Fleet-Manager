@@ -164,7 +164,7 @@ def filesystem_type(path: str | Path | None) -> str:
 
 def _windows_filesystem_type(path: Path) -> str:
     try:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         volume = ctypes.create_unicode_buffer(261)
         filesystem = ctypes.create_unicode_buffer(261)
         if not kernel32.GetVolumePathNameW(str(path), volume, 261):

@@ -109,18 +109,18 @@ def _pid_alive(pid: int | None) -> bool:
 
             process_query_limited_information = 0x1000
             still_active = 259
-            handle = ctypes.windll.kernel32.OpenProcess(
+            handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
                 process_query_limited_information, False, int(pid)
             )
             if not handle:
                 return False
             try:
                 exit_code = ctypes.c_ulong()
-                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):  # type: ignore[attr-defined]
                     return False
                 return exit_code.value == still_active
             finally:
-                ctypes.windll.kernel32.CloseHandle(handle)
+                ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 - best effort only
             return False
     try:

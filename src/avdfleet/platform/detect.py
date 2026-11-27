@@ -271,7 +271,7 @@ def _windows_total_ram_gb() -> float:
 
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
             return round(status.ullTotalPhys / (1024**3), 2)
     except (AttributeError, OSError, ValueError, TypeError):
         pass
@@ -291,7 +291,7 @@ def _cpu_count() -> int:
 def _windows_native_arch() -> CpuArch:
     """Return the *native* Windows architecture (ARM64 under x64 emulation too)."""
     try:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         kernel32.GetCurrentProcess.restype = ctypes.c_void_p
         is_wow64_process2 = kernel32.IsWow64Process2
         is_wow64_process2.restype = ctypes.c_int
@@ -324,7 +324,7 @@ def _is_admin(*, simulated: bool) -> bool:
         return False
     if sys.platform == "win32":
         try:
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
         except (AttributeError, OSError):
             return False
     if sys.platform != "win32":
