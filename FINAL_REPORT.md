@@ -309,7 +309,7 @@ leftovers and the Google-licence constraint.
 | Screenshots | `python scripts/screenshots.py` | **PASS** — 12 pages |
 | Wheel/sdist | `python scripts/build_release.py --no-sdist`; `python -m build --sdist` | **PASS** — 199-entry wheel (0.8 MiB) with UI + schemas; sdist with docs/screenshots |
 | Portable bundles | `PortableBundleBuilder` on prepared x64/ARM64 trees | **PASS** — x64 and ARM64 ZIPs built and verified; ARM64 launcher, GUI, authenticated API and relocation verified end-to-end |
-| Source archive | `dist/avdfleet-0.1.0-source.zip` | **PASS** — 396-file GitHub-ready tree, no secrets/runtime state |
+| Source archive | `dist/avdfleet-0.1.0-source.zip` | **PASS** — 398-file GitHub-ready tree, no secrets/runtime state |
 | Bootstrap | `python -m pytest bootstrap/test_bootstrap.py -q` | **PASS** — 37 passed, 1 skipped (no bash) |
 | Selftest | `avdfleet selftest --e2e --fakes --fast --count 1 --json` | **PASS (fakes)** — 15 pass, 0 fail, 2 skip |
 | CI | [GitHub Actions run 45931852696](https://github.com/willokocha-spec/AVD-Fleet-Manager/actions/runs/45931852696) | **PASS** — Python on Ubuntu/macOS/Windows, UI, installer containers, docs links, best-effort KVM |
