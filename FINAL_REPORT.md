@@ -83,7 +83,7 @@ engine:
 - UI tests: Vitest + Testing Library + MSW.
 - CI workflows for Linux/macOS/Windows, UI build, installer containers (best-effort) and
   a non-gating KVM E2E job; release workflow builds UI + wheel/sdist + checksums.
-  **CI is green on `main`** (run 45931852696): Python 3.12/ruff/mypy/pytest green on
+  **CI is green on `main`** (run 45953572457): Python 3.12/ruff/mypy/pytest green on
   Ubuntu, macOS ARM64 and Windows; UI typecheck/lint/test/build green; installer
   containers and docs links green. The KVM job is non-gating and self-reported green
   because its emulator test is best-effort.
@@ -99,7 +99,7 @@ engine:
 | 5 | Custom image imported from a directory boots an AVD | **BLOCKED end-to-end; import FAKES** | `tests/unit/test_images.py`; R6 import algorithm; selftest `--custom-image` not supplied |
 | 6 | `avdfleet apply -f fleet.yaml` rebuilds the fleet on a clean host | **FAKES PARTIAL** (plan/dry-run; no real clean-host apply) | 41 fleetspec integration tests; selftest fleet plan/dry-run; CLI/API fleet tests |
 | 7 | Portable: bundle --offline, fresh-machine offline GUI, boot to OOBE, script through proxy, relocation, filesystem diff, FAT32/noexec | **FAKES/PARTIAL** | 169 portable tests (1 symlink skip); real NTFS ADS unblock test; no real fresh-machine/removable-media run. Google licence forbids shipping Play components in the bundle. |
-| 8 | Lint, type checks, unit/contract/integration/portable/UI green on Linux/macOS/Windows; real-E2E where allowed | **PASS (static/unit), real E2E BLOCKED** | GitHub Actions run 45931852696: ruff, mypy and pytest green on Ubuntu, macOS ARM64 and Windows; UI 68/68 + typecheck/lint/build green; docs/installer jobs green. Real-emulator E2E still BLOCKED on this host. |
+| 8 | Lint, type checks, unit/contract/integration/portable/UI green on Linux/macOS/Windows; real-E2E where allowed | **PASS (static/unit), real E2E BLOCKED** | GitHub Actions run 45953572457: ruff, mypy and pytest green on Ubuntu, macOS ARM64 and Windows; UI 68/68 + typecheck/lint/build green; docs/installer jobs green. Real-emulator E2E still BLOCKED on this host. |
 | 9 | Docs complete | **DELIVERED** | `docs/` set, README, this report, 12 screenshots, contracts, research/ |
 
 **Exact fakes self-test result:** `avdfleet selftest --e2e --fakes --fast --count 1
@@ -182,7 +182,7 @@ in [BRIEF_ORIGINAL.md](BRIEF_ORIGINAL.md). Known deviations:
   Playwright against MSW mocks. A skipped real-emulator test lives at
   `tests/e2e/test_real_emulator.py`; it runs `avdfleet selftest --e2e` on an accelerated
   host. Real UI walkthrough on a live daemon is still required.
-- **CI is green** on Ubuntu, macOS ARM64 and Windows (run 45931852696); the portable,
+- **CI is green** on Ubuntu, macOS ARM64 and Windows (run 45953572457); the portable,
   fake-tooling and line-ending issues found only on those runners were fixed. Real
   emulator E2E remains unvalidated.
 - **Python 3.14** is the host default and unsupported; all runs used bundled 3.12.14.
@@ -312,7 +312,7 @@ leftovers and the Google-licence constraint.
 | Source archive | `dist/avdfleet-0.1.0-source.zip` | **PASS** — 398-file GitHub-ready tree, no secrets/runtime state |
 | Bootstrap | `python -m pytest bootstrap/test_bootstrap.py -q` | **PASS** — 37 passed, 1 skipped (no bash) |
 | Selftest | `avdfleet selftest --e2e --fakes --fast --count 1 --json` | **PASS (fakes)** — 15 pass, 0 fail, 2 skip |
-| CI | [GitHub Actions run 45931852696](https://github.com/willokocha-spec/AVD-Fleet-Manager/actions/runs/45931852696) | **PASS** — Python on Ubuntu/macOS/Windows, UI, installer containers, docs links, best-effort KVM |
+| CI | [GitHub Actions run 45953572457](https://github.com/willokocha-spec/AVD-Fleet-Manager/actions/runs/45953572457) | **PASS** — Python on Ubuntu/macOS/Windows, UI, installer containers, docs links, best-effort KVM |
 
 ## 9. Links
 
