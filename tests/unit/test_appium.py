@@ -34,8 +34,19 @@ FAKE_APPIUM_SOURCE = dedent(
     """
     import json
     import os
+    import socketserver
     import sys
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Server(ThreadingHTTPServer):
+        # HTTPServer.server_bind() calls socket.getfqdn(), which can block for a
+        # long time on CI runners with no reverse DNS.  The fake Appium server
+        # only needs the numeric endpoint.
+        def server_bind(self):
+            socketserver.TCPServer.server_bind(self)
+            host, port = self.server_address[:2]
+            self.server_name = host
+            self.server_port = port
 
     state_dir = os.environ.get("FAKE_APPIUM_STATE") or "."
     events_path = os.path.join(state_dir, "events.jsonl")
@@ -94,7 +105,7 @@ FAKE_APPIUM_SOURCE = dedent(
         def log_message(self, *args):
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = _Server(("127.0.0.1", port), Handler)
     with open(os.path.join(state_dir, "server-state.json"), "w", encoding="utf-8") as handle:
         json.dump({"running": True, "port": port, "pid": os.getpid()}, handle)
     print("fake appium listening on %d" % port, flush=True)
