@@ -658,6 +658,7 @@ export type EventType =
   | "proxy.created"
   | "proxy.updated"
   | "proxy.checked"
+  | "instrumentation.run"
   | "script.run.started"
   | "script.run.output"
   | "script.run.finished"
@@ -697,4 +698,279 @@ export interface InstallStepPayload {
   step: string;
   status: "pending" | "running" | "succeeded" | "failed" | "skipped" | "reboot_required";
   message?: string;
+}
+
+/**
+ * Payload of the `instrumentation.run` event published on `/ws/events`.
+ *
+ * Mirrors `InstrumentationService._emit` (`src/avdfleet/instrumentation/service.py`):
+ * `started` carries `profile_id`, `finished` carries `state` and `failed`.
+ */
+export interface InstrumentationRunEventPayload {
+  action: "started" | "finished";
+  run_id: string;
+  profile_id?: string;
+  targets: string[];
+  state?: InstrumentationRunState;
+  failed?: string[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* Root & Instrumentation (`/api/v1/instrumentation`)                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Mirrors `src/avdfleet/instrumentation/models.py`. The OpenAPI contract lists
+ * the `/instrumentation` endpoints but describes their responses as free-form
+ * objects, so these interfaces are the typed source of truth for the GUI.
+ *
+ * Naming notes:
+ * - `RunState` above belongs to the script runner, so the instrumentation run
+ *   state is exported as `InstrumentationRunState` (same wire values as the
+ *   backend `RunState`).
+ * - `ComponentState` keeps *installed*, *enabled* and *active* apart: a Magisk
+ *   module copied onto the device is installed, the persisted switch is
+ *   `enabled`, and only a framework pass after a reboot makes it `active`.
+ */
+
+export type InstrumentationRunState =
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "partial"
+  | "failed"
+  | "cancelled";
+
+export type ModuleKind = "xposed_apk" | "magisk_zip" | "zygisk_zip" | "lsposed_zip" | "unknown";
+
+export type RootImplementation = "none" | "adb_root" | "magisk";
+
+export type ComponentState = "absent" | "installed" | "enabled" | "active" | "unsupported" | "unknown";
+
+export type StepAction =
+  | "verify_root"
+  | "install_magisk"
+  | "complete_magisk_setup"
+  | "enable_zygisk"
+  | "disable_zygisk"
+  | "install_lsposed"
+  | "install_module"
+  | "enable_module"
+  | "disable_module"
+  | "remove_module"
+  | "enable_xposed_module"
+  | "set_xposed_scope"
+  | "enable_adb_root"
+  | "enable_writable_system"
+  | "install_lsposed_manager"
+  | "reboot"
+  | "remove_lsposed"
+  | "remove_magisk"
+  | "verify";
+
+export interface ModuleRecord {
+  id: string;
+  kind: ModuleKind;
+  name: string;
+  package_name: string;
+  version: string;
+  version_code: number;
+  min_sdk: number;
+  abi: string;
+  description: string;
+  sha256: string;
+  size_bytes: number;
+  source: string;
+  source_url: string;
+  file_path: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InstalledModule {
+  identifier: string;
+  kind: ModuleKind;
+  version: string;
+  enabled: boolean;
+  active: boolean;
+  source: string;
+  /** Application packages this module targets in LSPosed (empty for Magisk modules). */
+  scope: string[];
+  notes: string[];
+}
+
+export interface CapabilityFlags {
+  adb_root: boolean;
+  writable_system: boolean;
+  magisk: boolean;
+  magisk_version: string;
+  magisk_environment_ready: boolean;
+  zygisk_available: boolean;
+  zygisk_enabled: boolean;
+  zygisk_active: boolean;
+  lsposed_installed: boolean;
+  lsposed_version: string;
+  lsposed_active: boolean;
+  reboot_required: boolean;
+  notes: string[];
+}
+
+export interface DeviceInstrumentation {
+  instance: string;
+  api_level: number;
+  abi: string;
+  image_id: string;
+  image_tag: string;
+  serial: string;
+  running: boolean;
+  boot_completed: boolean;
+  root_implementation: RootImplementation;
+  capabilities: CapabilityFlags;
+  xposed_modules: InstalledModule[];
+  magisk_modules: InstalledModule[];
+  compatible: boolean;
+  blockers: string[];
+  probed_at: string;
+}
+
+export interface ProfileStep {
+  id: string;
+  action: StepAction;
+  module_id: string;
+  module_identifier: string;
+  params: Record<string, unknown>;
+}
+
+export interface InstrumentationProfile {
+  id: string;
+  name: string;
+  description: string;
+  revision: number;
+  steps: ProfileStep[];
+  builtin: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StepResult {
+  step_id: string;
+  action: StepAction;
+  ok: boolean;
+  message: string;
+  data: Record<string, unknown>;
+  /**
+   * Reported by the live backend model but omitted when a run is read back from
+   * SQLite (`repository._run_from_row` does not persist it): treat as optional.
+   */
+  state?: ComponentState;
+}
+
+export interface TargetResult {
+  instance: string;
+  ok: boolean;
+  skipped: boolean;
+  error: string;
+  steps: StepResult[];
+}
+
+export interface DeploymentRun {
+  id: string;
+  profile_id: string;
+  label: string;
+  state: InstrumentationRunState;
+  targets: string[];
+  results: TargetResult[];
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error: string;
+}
+
+export interface LogEntry {
+  id: number;
+  run_id: string;
+  instance: string;
+  level: string;
+  message: string;
+  at: string;
+}
+
+/** Request body for create/update profile (`POST`/`PUT /instrumentation/profiles`). */
+export interface StepBody {
+  id?: string;
+  action: StepAction;
+  module_id?: string;
+  module_identifier?: string;
+  params?: Record<string, unknown>;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Toolchain acquisition (`/instrumentation/toolchain`)                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Mirrors `ArtifactStatus` in `src/avdfleet/instrumentation/acquire.py`.
+ *
+ * `present` and `verified` are deliberately separate: the store reports a local
+ * copy even when its SHA-256/size no longer matches the pin, and a file that
+ * failed verification must never be presented as usable.
+ *
+ * `pinned_*` describe the release this build knows about; `size_bytes`,
+ * `sha256`, `path` and `acquired_at` describe what is actually on the host and
+ * stay empty while `present` is false.
+ */
+export type ArtifactKind = "apk" | "module_zip";
+
+export interface ArtifactStatus {
+  key: string;
+  name: string;
+  version: string;
+  kind: ArtifactKind;
+  min_api: number;
+  source_url: string;
+  pinned_sha256: string;
+  pinned_size_bytes: number;
+  present: boolean;
+  verified: boolean;
+  path: string;
+  size_bytes: number;
+  sha256: string;
+  acquired_at: string;
+}
+
+/**
+ * One provenance row from the daemon manifest (`manifest.json`). Every field is
+ * optional because the API types the list as free-form objects.
+ */
+export interface ToolchainManifestEntry {
+  key?: string;
+  name?: string;
+  version?: string;
+  kind?: string;
+  sha256?: string;
+  size_bytes?: number;
+  source_url?: string;
+  licence?: string;
+  acquired_at?: string;
+}
+
+/** `GET /instrumentation/toolchain`. */
+export interface ToolchainView {
+  artifacts: ArtifactStatus[];
+  manifest: ToolchainManifestEntry[];
+  /** False when the daemon has no acquisition store configured. */
+  available: boolean;
+}
+
+/**
+ * `POST /instrumentation/toolchain/{key}/acquire`.
+ *
+ * `module_id` is empty for an APK (a payload for an external ramdisk patcher,
+ * not a final install) and carries the library module id for a module ZIP,
+ * which the backend imports before returning.
+ */
+export interface ToolchainAcquireResult {
+  artifact: ArtifactStatus;
+  module_id: string;
 }

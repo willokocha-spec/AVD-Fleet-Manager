@@ -8,8 +8,11 @@
  *   provider uses to drop the session and show the connect screen.
  * - Every request is bounded by a timeout and can be cancelled by the caller.
  *
- * Endpoint coverage is 1:1 with `contracts/openapi.yaml`. Do not add methods
- * for endpoints that are not in the contract.
+ * Endpoint coverage is 1:1 with `contracts/openapi.yaml`. The Root &
+ * Instrumentation namespace at the bottom is typed from
+ * `src/avdfleet/instrumentation/models.py`, because the contract describes those
+ * responses as free-form objects. Do not add methods for endpoints that are not
+ * in the contract.
  */
 
 import {
@@ -32,6 +35,8 @@ import type {
   ConfigPatch,
   ConfigView,
   CreateSnapshotRequest,
+  DeploymentRun,
+  DeviceInstrumentation,
   DeviceProfile,
   DoctorReport,
   DownloadImageRequest,
@@ -41,7 +46,11 @@ import type {
   ImageImportRequest,
   InputRequest,
   InstanceCreateRequest,
+  InstrumentationProfile,
   ListImagesQuery,
+  LogEntry,
+  ModuleKind,
+  ModuleRecord,
   OobeMatrix,
   OobeRecord,
   OobeResetRequest,
@@ -59,10 +68,13 @@ import type {
   ScriptRunRequest,
   Snapshot,
   StartInstanceRequest,
+  StepBody,
   StopInstanceRequest,
   SystemImage,
   SystemInfo,
   Template,
+  ToolchainAcquireResult,
+  ToolchainView,
   UpdateInstanceConfigRequest,
   VerifyGuestRequest,
   VerifyOobeRequest,
@@ -240,10 +252,16 @@ async function httpFetch(path: string, options: RequestOptions = {}): Promise<Re
     const token = getStoredToken();
     if (token) headers.set("Authorization", `Bearer ${token}`);
   }
-  let payload: string | undefined;
+  let payload: string | FormData | undefined;
   if (body !== undefined) {
-    headers.set("Content-Type", "application/json");
-    payload = JSON.stringify(body);
+    if (body instanceof FormData) {
+      // Multipart uploads: the browser must set the boundary itself, so no
+      // Content-Type header is written here.
+      payload = body;
+    } else {
+      headers.set("Content-Type", "application/json");
+      payload = JSON.stringify(body);
+    }
   }
 
   // In a browser the global fetch and window.fetch are the same function, so a
@@ -575,3 +593,130 @@ export type ApiClient = typeof api;
 
 /** Convenience: `/health` lives at the daemon root, not under `/api/v1`. */
 export const healthUrl = (): string => buildRootUrl("/health");
+
+/* -------------------------------------------------------------------------- */
+/* Root & Instrumentation                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Typed client for `/api/v1/instrumentation`.
+ *
+ * Implemented by `src/avdfleet/api/routes/instrumentation.py`; the shapes come
+ * from `src/avdfleet/instrumentation/models.py` because the OpenAPI contract
+ * declares the responses as free-form objects. Every call goes through the
+ * shared transport: bearer token, timeout and `ApiError` parsing.
+ */
+export const instrumentationApi = {
+  /** `GET /instrumentation/capabilities?targets=a,b` — probe without scanning twice. */
+  getCapabilities: (targets: string[]) =>
+    request<{ devices: DeviceInstrumentation[] }>("/instrumentation/capabilities", {
+      query: { targets: targets.join(",") },
+      timeoutMs: 120_000,
+    }),
+
+  /** `POST /instrumentation/scan` — probe every selected AVD. */
+  scan: (targets: string[]) =>
+    request<{ devices: DeviceInstrumentation[] }>("/instrumentation/scan", {
+      method: "POST",
+      body: { targets },
+      timeoutMs: 180_000,
+    }),
+
+  /** `GET /instrumentation/modules?kind=` — the central module library. */
+  listModules: (kind?: ModuleKind) =>
+    request<{ modules: ModuleRecord[] }>("/instrumentation/modules", { query: { kind } }),
+
+  /** `POST /instrumentation/modules/import` — multipart `file` field. */
+  importModuleFile: (file: File) => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return request<ModuleRecord>("/instrumentation/modules/import", {
+      method: "POST",
+      body: form,
+      timeoutMs: 5 * 60_000,
+    });
+  },
+
+  /** `POST /instrumentation/modules/import` — JSON `{"path": "…"}` (daemon host path). */
+  importModulePath: (path: string) =>
+    request<ModuleRecord>("/instrumentation/modules/import", { method: "POST", body: { path } }),
+
+  /** `POST /instrumentation/modules/import` — JSON `{"url": "https://…"}`. */
+  importModuleUrl: (url: string) =>
+    request<ModuleRecord>("/instrumentation/modules/import", {
+      method: "POST",
+      body: { url },
+      timeoutMs: 5 * 60_000,
+    }),
+
+  deleteModule: (moduleId: string) =>
+    request<void>(`/instrumentation/modules/${encodeURIComponent(moduleId)}`, { method: "DELETE" }),
+
+  listProfiles: () =>
+    request<{ profiles: InstrumentationProfile[] }>("/instrumentation/profiles"),
+
+  createProfile: (body: { name: string; description: string; steps: StepBody[] }) =>
+    request<InstrumentationProfile>("/instrumentation/profiles", { method: "POST", body }),
+
+  updateProfile: (
+    profileId: string,
+    body: { name: string; description: string; steps: StepBody[] },
+  ) =>
+    request<InstrumentationProfile>(
+      `/instrumentation/profiles/${encodeURIComponent(profileId)}`,
+      { method: "PUT", body },
+    ),
+
+  deleteProfile: (profileId: string) =>
+    request<void>(`/instrumentation/profiles/${encodeURIComponent(profileId)}`, {
+      method: "DELETE",
+    }),
+
+  /** `POST /instrumentation/profiles/{id}/clone` — copy any profile into an editable one. */
+  cloneProfile: (profileId: string, name = "") =>
+    request<InstrumentationProfile>(
+      `/instrumentation/profiles/${encodeURIComponent(profileId)}/clone`,
+      { method: "POST", body: { name } },
+    ),
+
+  createDeployment: (body: { profile_id: string; targets: string[]; label?: string }) =>
+    request<DeploymentRun>("/instrumentation/deployments", { method: "POST", body }),
+
+  listDeployments: (limit = 50) =>
+    request<{ runs: DeploymentRun[] }>("/instrumentation/deployments", { query: { limit } }),
+
+  getDeployment: (runId: string) =>
+    request<DeploymentRun>(`/instrumentation/deployments/${encodeURIComponent(runId)}`),
+
+  cancelDeployment: (runId: string) =>
+    request<DeploymentRun>(
+      `/instrumentation/deployments/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" },
+    ),
+
+  listDeploymentLogs: (runId: string, limit = 500) =>
+    request<{ logs: LogEntry[] }>(
+      `/instrumentation/deployments/${encodeURIComponent(runId)}/logs`,
+      { query: { limit } },
+    ),
+
+  /**
+   * `GET /instrumentation/toolchain` — pinned GPL-3.0 artifacts and whether a
+   * verified copy is already on the daemon. `available: false` means the daemon
+   * has no acquisition store configured; nothing can be downloaded.
+   */
+  getToolchain: () => request<ToolchainView>("/instrumentation/toolchain"),
+
+  /**
+   * `POST /instrumentation/toolchain/{key}/acquire` — download, verify and (for
+   * a module ZIP) import the pinned release. Without `confirm: true` the API
+   * answers HTTP 409 with a consent message and performs no download.
+   */
+  acquireToolchain: (key: string, confirm: boolean) =>
+    request<ToolchainAcquireResult>(
+      `/instrumentation/toolchain/${encodeURIComponent(key)}/acquire`,
+      { method: "POST", body: { confirm }, timeoutMs: 10 * 60_000 },
+    ),
+} as const;
+
+export type InstrumentationApiClient = typeof instrumentationApi;

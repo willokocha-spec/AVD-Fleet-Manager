@@ -15,6 +15,7 @@ const EXPECTED_PATHS = [
   "/templates",
   "/deploy",
   "/proxies",
+  "/instrumentation",
   "/scripts",
   "/runs",
   "/settings",
@@ -25,6 +26,7 @@ const EXPECTED_PATHS = [
 const EXPECTED_NAV = [
   "Dashboard",
   "Fleet",
+  "Root & Instrumentation",
   "Images",
   "Templates",
   "Proxies",
