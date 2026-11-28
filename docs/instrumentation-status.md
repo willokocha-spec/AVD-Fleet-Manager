@@ -115,8 +115,8 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 | 7 | https-to-http redirect refused before the request; no query strings in errors | done |
 | 8 | Redirects to loopback/link-local/private/reserved addresses refused | done |
 | 9 | Wildcard bind accepts the loopback browser origin | done |
-| 10 | Guest-side bridge isolation proof | not run (needs a quiet emulator host; documented gap) |
-| 11 | 17+ instances under one adb server | not run (host capacity; documented gap) |
+| 10 | Guest-side bridge isolation proof | done — holds (407 without credentials and with another instance's credential; only the control request reached the upstream). Recorded in docs/acceptance.md. |
+| 11 | 17+ instances under one adb server | done — 17/17 visible (ports 5554–5586), 17/17 after `adb kill-server`, doctor `adb_transport=ok`; recorded in docs/acceptance.md |
 | 12 | Lint gap (`scripts/` in ruff + CI) | done |
 
 ## Resume instructions
@@ -191,3 +191,24 @@ $env:ADB_LOCAL_TRANSPORT_MAX_PORT = "5681"; adb kill-server; adb start-server
 
 AVD Fleet sets this for every adb it starts; only a server started by something else
 (or by an older build) trips the check.
+
+## Open defects found by the item-10 proof
+
+These were found while proving guest isolation and are **not yet fixed**; each is
+reproducible from the evidence in `docs/acceptance.md`.
+
+1. **HIGH — detached bridge port collision on Windows.** Starting two instances with
+   detached bridges published both workers on `127.0.0.1:7800` (the second binder wins
+   because of `SO_REUSEADDR`), so the first instance's traffic reaches the second
+   instance's listener. It fails closed (407), but concurrent bridged instances are
+   unusable and the per-instance port assumption is wrong. Suggested fix: have the
+   worker bind port 0, write the chosen port into its state file, and have the manager
+   wait for that handshake instead of pre-allocating a port in the parent process.
+2. **MEDIUM — bridge token is plaintext in `<data>/bridge/<instance>-<hash>.json`.**
+   Any process running as the same user can read it and use that listener. Guest
+   isolation is unaffected. Suggested fix: rely on the `0600` file mode already
+   available to the state file, or store a hash of the token and compare hashes.
+3. **LOW/unconfirmed — `POST /instances/{name}/stop` reported `stopped` while the qemu
+   PIDs were still alive.** Seen once under a separate daemon with a temp data dir;
+   may be an artefact of the harness rather than the product. Needs a focused
+   reproduction before it is treated as a defect.

@@ -258,3 +258,165 @@ evidence):
 
 No result on this page should be upgraded to "real emulator" without a cited
 record like the ones in the live page.
+
+## Audit item 10 - hostile guest vs another instance's proxy bridge (2026-11-28)
+
+**Claim tested** ([security.md](security.md) §API, `FINAL_REPORT.md` §5): *"Another
+AVD or local process cannot reuse that listener."*
+
+### Setup
+
+- Image `system-images;android-25;google_apis;x86`, 1536 MiB, headless; template
+  `iso10-tpl`; instances `iso-a` (`emulator-5558`) and `iso-b` (`emulator-5560`).
+  Both reached `sys.boot_completed=1`.
+- Two proxy records, `iso10-a-up`/`iso10-b-up` (distinct credentials), both
+  pointing at one capturing upstream on `127.0.0.1:8899` (Python
+  `http.server`; it logs `METHOD URL`, the `Proxy-Authorization` username and
+  the source port, and answers `200 CAPTURED`).
+- **Deviation required by a product defect (Finding 1):** the product's detached
+  bridge workers collide on `127.0.0.1:7800` on this Windows host, so the four
+  attempts were run against two listeners created through the *same*
+  `AsyncBridgeManager`/`HttpProxyServer` code with explicit ports and
+  product-style `secrets.token_urlsafe(32)` tokens: iso-a on `127.0.0.1:7800`,
+  iso-b on `127.0.0.1:7802`. Neither token was put in a guest; both were read
+  host-side only to build the test headers.
+
+Commands run from guest A (toybox `nc`, not curl); the tokens are redacted here:
+
+```bash
+adb -s emulator-5558 shell "printf 'GET http://probe.invalid/iso10/attempt1-no-creds HTTP/1.1\r\nHost: probe.invalid\r\n\r\n' | toybox nc -q 3 -w 5 10.0.2.2 7802"
+adb -s emulator-5558 shell "printf 'GET http://probe.invalid/iso10/attempt2-a-creds HTTP/1.1\r\nHost: probe.invalid\r\nProxy-Authorization: Basic <base64(iso-a:token_A)>\r\n\r\n' | toybox nc -q 3 -w 5 10.0.2.2 7802"
+adb -s emulator-5558 shell "printf 'GET http://probe.invalid/iso10/attempt3-b-creds HTTP/1.1\r\nHost: probe.invalid\r\nProxy-Authorization: Basic <base64(iso-b:token_B)>\r\n\r\n' | toybox nc -q 3 -w 5 10.0.2.2 7802"
+adb -s emulator-5558 shell "printf 'GET http://probe.invalid/iso10/control-a HTTP/1.1\r\nHost: probe.invalid\r\nProxy-Authorization: Basic <base64(iso-a:token_A)>\r\n\r\n' | toybox nc -q 3 -w 5 10.0.2.2 7800"
+```
+
+`settings get global http_proxy` returned `null` on both guests, so neither guest
+exposes its listener token (or anyone else's) through Android settings.
+
+### The four responses (raw, captured 2026-11-28T07:31:48Z)
+
+| # | Guest A -> | Credential | Status | Upstream saw it? |
+|---|---|---|---|---|
+| 1 | B's bridge `10.0.2.2:7802` | none | **407** | no |
+| 2 | B's bridge `10.0.2.2:7802` | A's (wrong instance) | **407** | no |
+| 3 | B's bridge `10.0.2.2:7802` | B's valid token | **200 CAPTURED** | yes, as `iso10-b-up` |
+| 4 | A's own bridge `10.0.2.2:7800` | A's (control) | **200 CAPTURED** | yes, as `iso10-a-up` |
+
+Attempts 1 and 2 (identical framing):
+
+```
+HTTP/1.1 407 Error
+Content-Type: text/plain; charset=utf-8
+Content-Length: 46
+Connection: close
+Proxy-Agent: avdfleet-bridge
+Proxy-Authenticate: Basic realm="avdfleet-bridge"
+
+avdfleet bridge: proxy authentication required
+```
+
+Attempts 3 and 4:
+
+```
+HTTP/1.1 200 OK
+Server: BaseHTTP/0.6 Python/3.13.18
+Date: Sat, 28 Nov 2026 07:31:48 GMT
+Content-Type: text/plain
+Content-Length: 9
+Connection: close
+
+CAPTURED
+```
+
+### Capturing-upstream log
+
+The log was reset immediately before the four attempts (earlier lines were the
+emulators' own boot-time `CONNECT 127.0.0.1:5682` probes, not guest traffic):
+
+```
+2026-11-28T07:31:48+0000 #20 GET http://probe.invalid/iso10/attempt3-b-creds host=probe.invalid auth=basic:iso10-b-up source=127.0.0.1:58113
+2026-11-28T07:31:48+0000 #21 GET http://probe.invalid/iso10/control-a      host=probe.invalid auth=basic:iso10-a-up source=127.0.0.1:58118
+```
+
+No line exists for attempts 1 or 2: the unauthenticated and wrong-instance
+requests never reached any upstream.
+
+### Verdict
+
+**Item 10 holds against a hostile guest.** Authorization is
+`username == instance` and `hmac.compare_digest(password, per-instance token)`
+(`proxy/bridge/http_proxy.py` `_local_auth_ok`), and guest A's own credential is
+refused by B's listener (attempt 2), as is no credential (attempt 1).
+
+**The stricter criterion in the test brief - "the upstream log must contain only
+the control request" - is not met**, because attempt 3 deliberately presented
+B's *valid* token and was forwarded. That is correct bearer-token behaviour, not
+a guest-reachable bypass: the 43-character token exists only in host-side files
+(bridge worker state, emulator log/env); the guest cannot read it
+(`http_proxy` setting is `null`) and the 407 response reveals nothing. Recorded
+here so the difference between "broken authorization" and "the test supplied the
+secret" is explicit.
+
+### Findings
+
+1. **Windows detached-bridge port collision (high; needs fixing).** Starting
+   iso-a then iso-b produced two workers that both published
+   `listen_port: 7800, socks_port: 7801`; `avdfleet proxies bridges` listed both
+   instances on `127.0.0.1:7800`, and `Get-NetTCPConnection` showed one PID
+   owning 7800/7801. The second bind succeeds only because the listener sets
+   `SO_REUSEADDR` and Windows permits it; the later binder takes the traffic and
+   the first instance's listener is shadowed. Consequence: more than one proxied
+   instance on Windows cannot have a distinct bridge - instance A's emulator is
+   pointed at B's listener and is rejected (fails closed, but A has no egress).
+   Fix direction: explicit `SO_EXCLUSIVEADDRUSE`/exclusive bind or cross-worker
+   port coordination.
+2. **Listener token is in plaintext host state.** `<data>/bridge/<instance>-<hash>.json`
+   contains `"token": "<43 chars>"` (readable by the same user). Any same-user
+   local process can therefore reuse another instance's bridge, contradicting the
+   "or local process" half of the claim (guest isolation itself is unaffected).
+3. **`POST /api/v1/instances/{name}/stop` reported `stopped` while both qemu
+   processes were still alive** (~11 s later); they had to be killed by PID.
+
+### Cleanup (same run)
+
+`iso-a`/`iso-b` stopped and their qemu processes killed; both AVDs and template
+`iso10-tpl` deleted; both `iso10-*` proxies deleted; bridge harness, capturing
+proxy and the temporary `serve` on port 8765 stopped. Port 8899 is free. The
+pre-existing AVDs (`CloneForge_*`, `Device*`, `Sentry_API37`,
+`MagiskAcceptance33`) and their emulators (5556, 5562, 5578) were untouched
+(timestamps unchanged). Seventeen `audit11-*` AVDs created by a separate
+concurrent run were left alone.
+
+## 2026-11-28 — more than 16 instances under one adb server (item 11)
+
+**Verdict: verified.** Seventeen emulators are visible under a single adb server,
+including console ports past the default 5554+16 ceiling.
+
+Setup: 17 AVDs from `system-images;android-25;google_apis;x86` (512 MB, 1 core,
+headless, `-no-snapshot`), console ports 5554–5586. The adb server was restarted
+by this session with `ADB_LOCAL_TRANSPORT_MAX_PORT=5681` before the emulators
+started, which is what the project's `childenv` policy does for servers it starts.
+
+Observed:
+
+```text
+started 15 emulators; free=31.2GB
+listed=13 free=23GB
+listed=17 free=21.6GB
+RESULT visible=17 of 17
+serials: emulator-5554,emulator-5556,...,emulator-5586
+max console port: 5586
+after kill-server visible=17
+doctor adb_transport=ok
+```
+
+The highest console port (5586) is above 5554+16 = 5570, so the default limit
+would have hidden instances 17+. After `adb kill-server` and an implicit restart
+all 17 re-attached, and `avdfleet doctor --slow` reported `adb_transport=ok`.
+
+Cleanup: all 17 AVDs and emulator processes removed afterwards; the host was left
+with the user's eight AVDs and no emulator running.
+
+Note: the first attempt at this proof was aborted by disk pressure (17 emulators'
+userdata plus stale quickboot snapshots); clearing regenerable snapshots and
+orphaned test AVDs made room. That is environmental, not a product defect.
