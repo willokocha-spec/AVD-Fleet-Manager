@@ -1042,7 +1042,12 @@ class InstrumentationService:
             )
         install = self._root_shell(target, f"pm install -r {apk}", magisk=True)
         check = self._prober.shell(target.serial, "pm list packages org.lsposed.manager")
-        ok = check.ok and "org.lsposed.manager" in check.text()
+        installed = {
+            line.strip().removeprefix("package:")
+            for line in check.stdout.splitlines()
+            if line.strip()
+        }
+        ok = check.ok and "org.lsposed.manager" in installed
         return StepResult(
             step_id=step.id,
             action=step.action,

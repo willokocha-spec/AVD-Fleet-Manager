@@ -392,6 +392,14 @@ def _default_http_get(url: str, limit: int) -> bytes:  # pragma: no cover - netw
         client.stream("GET", url) as response,
     ):
         response.raise_for_status()
+        # The guard in import_url only sees the initial URL; httpx follows redirects,
+        # so verify the URL actually being read did not downgrade the scheme.
+        final = str(response.url)
+        if url.lower().startswith("https://") and not final.lower().startswith("https://"):
+            raise ValidationError(
+                f"the download was redirected to an insecure URL: {final}",
+                hint="nothing was stored; use an https source that does not redirect",
+            )
         chunks: list[bytes] = []
         total = 0
         for chunk in response.iter_bytes():

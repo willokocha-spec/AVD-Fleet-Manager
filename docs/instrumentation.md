@@ -114,7 +114,10 @@ behaviours below are the result; they are enforced by those tests:
   run for that instance and profile is queued/running, `dry_run` starts queue
   nothing, and deleting a profile clears its bindings.
 - **Provenance is redacted.** `import_url` strips userinfo and query values before
-  storing `source_url`.
+  storing `source_url`, and a redirect that downgrades an https acquisition to plain
+  http is refused before any bytes are stored.
+- **The LSPosed manager check is exact.** `pm list packages` output is parsed into a
+  set, so a package merely containing `org.lsposed.manager` cannot satisfy it.
 
 ### Lifecycle automation
 
