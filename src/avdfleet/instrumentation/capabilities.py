@@ -131,6 +131,8 @@ class DeviceProber:
         self._timeout_s = float(timeout_s)
         self._allow_adb_root = bool(allow_adb_root)
         self._runner = runner
+        #: Serials whose adbd has already been restarted as uid 0.
+        self._adbd_root: set[str] = set()
 
     # -- process boundary ------------------------------------------------
     def run(self, serial: str, *args: str, timeout_s: float | None = None) -> CommandResult:
@@ -157,6 +159,10 @@ class DeviceProber:
     def shell(self, serial: str, command: str, *, timeout_s: float | None = None) -> CommandResult:
         return self.run(serial, "shell", command, timeout_s=timeout_s)
 
+    def forget_root(self, serial: str) -> None:
+        """Drop the cached adbd-root state; a guest reboot resets it."""
+        self._adbd_root.discard(serial)
+
     def root_shell(self, serial: str, command: str, *, magisk: bool) -> CommandResult:
         """Run *command* with whatever root path this device has.
 
@@ -165,7 +171,16 @@ class DeviceProber:
         runs directly through the rooted adbd.
         """
         if magisk:
-            return self.shell(serial, f'su -c "{_escape(command)}"')
+            result = self.shell(serial, f'su -c "{_escape(command)}"')
+            # Magisk asks the user to grant shell su on a fresh device; until that
+            # happens the request is rejected and a su-only implementation would
+            # misreport a healthy environment as missing.
+            lowered = (result.stdout or "") + (result.stderr or "")
+            if result.ok and "rejected" not in lowered.lower():
+                return result
+        if serial not in self._adbd_root:
+            self.run(serial, "root")
+            self._adbd_root.add(serial)
         return self.shell(serial, command)
 
     # -- individual probes ----------------------------------------------
@@ -422,7 +437,7 @@ class DeviceProber:
             if "uid=0" in probe_text and "u:r:magisk:s0" in probe_text:
                 root = RootImplementation.MAGISK
                 flags.magisk = True
-            elif self.adb_root_available(props):
+            elif self.adb_root_available(props) or not props:
                 if self._allow_adb_root:
                     root_result = self.run(serial, "root")
                     follow = self.shell(serial, "id") if root_result.ok else root_result

@@ -30,7 +30,7 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 | 8 | **Secret leak**: installer child env copied `os.environ` | done | now `child_environment(extra=…)`; token/vault passphrase no longer inherited |
 | 9 | **`adb_root` semantics** + single-pass module enumeration | done | bare `adb shell id`; inventory enumerated once and shared with the LSPosed check |
 | 10 | **Xposed module inventory + scope** (via LSPosed DB) | done | `xposed_modules()` reads `modules`/`scope` tables; `enable_xposed_module` + `set_xposed_scope` steps; package-name validation is the injection boundary |
-| 11 | Live LSPosed verification on API 34 | done | activated end-to-end: `zygisk_lsposed` module, `pidof lspd`, manager installed separately, Overview reports Activated; Zygisk proven by `zygiskd64`; API 25 still refuses LSPosed (< API 27) |
+| 11 | Live LSPosed verification on API 34 | done | full profile succeeded end-to-end; see below | activated end-to-end: `zygisk_lsposed` module, `pidof lspd`, manager installed separately, Overview reports Activated; Zygisk proven by `zygiskd64`; API 25 still refuses LSPosed (< API 27) |
 | 12 | `docs/api.md` (says 57 paths) and `docs/cli.md` (no instrumentation) | done | api.md now 71 paths/89 operations with a Root and instrumentation group; cli.md has the full command section incl. toolchain and the setup/reboot note |
 | 13 | Revert `ui/public/mockServiceWorker.js` | done | `git checkout` |
 | 14 | Contract error declarations | done | 404/409 responses declared on the instrumentation operations (89 total ops); response bodies remain free-form |
@@ -42,17 +42,6 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 | 20 | WebSocket events for deployments | done | `EventType.INSTRUMENTATION_RUN` with `started`/`finished`; publish failures never break a run |
 | 18 | Built-in profiles refresh in place | done | an upgrade that adds a step now updates existing installs (built-ins are read-only, so this cannot clobber user edits) |
 
-## Known limitation (unattended setup)
-
-`complete_magisk_setup`'s tap targeting is unit-tested against the real API-34 dialog XML,
-and a manual tap at the computed coordinates (890,1348) completed the setup on that image
-(`/data/adb/magisk` populated, app reported "Restarting…"). The full unattended sequence
-has **not** been observed green end-to-end. Three attempts failed for environmental reasons
-rather than logic: two 2 GB AVDs hit `System UI isn't responding`, and a 4 GB run showed
-Magisk rejecting the shell's su request (`su: request rejected (2000)`) before the app could
-run its setup. Treat it as implemented, unit-tested at every branch, and partially verified;
-the remaining work is a device where the Magisk app itself can complete setup.
-
 ## Verified live in this pass
 
 - Acquisition: LSPosed 1.9.2 downloaded over HTTPS, 2,462,055 bytes, SHA-256 matched the
@@ -60,6 +49,16 @@ the remaining work is a device where the Magisk app itself can complete setup.
   `mod_0ebc6bcb465d1c4b` (`lsposed_zip`, source `official-release`).
 - Consent gate: `toolchain acquire lsposed` without `--confirm` returns the 409 message.
 - API 25 capability scan: `root=adb_root`, `magisk=false`, explicit blockers.
+- **Full LSPosed profile ran end-to-end on a real API-34 AVD**: `complete_magisk_setup`
+  (populated `/data/adb/magisk`), `enable_zygisk`, `reboot` (waited for boot),
+  `install_lsposed` (v1.9.2), `reboot`, `install_lsposed_manager` → run state
+  **succeeded**; the follow-up scan reported root `magisk`, LSPosed `1.9.2 (7024)`
+  installed and **active**. A second targeted run produced the same `succeeded`.
+- Two real defects were found by that run and fixed: the Magisk gate after a reboot
+  (shell `su` is rejected until the app grants it, so the code now falls back to
+  adbd root) and a stale adbd-root cache surviving a guest reboot.
+- On-device LSPosed query path exercised: `set_xposed_scope` against the real
+  `modules_config.db` correctly reported `unsupported` for an unregistered package.
 - Magisk root discriminator verified on both API levels: `su -c id` reports
   `context=u:r:magisk:s0` for Magisk versus `u:r:su:s0` for a plain `adb root`.
 - Zygisk defaults off; activation is a running `zygiskd64`, not `/sbin/.magisk`

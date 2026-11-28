@@ -577,6 +577,16 @@ class InstrumentationService:
                 ),
             )
         device = self._probe(target)
+        if not device.capabilities.magisk:
+            # magiskd can still be starting, and shell su is rejected until the app
+            # grants it; adbd root is enough to see whether the payload is alive.
+            for _ in range(8):
+                pid = self._prober.root_shell(target.serial, "pidof magiskd", magisk=True)
+                version = self._prober.root_shell(target.serial, "magisk -V", magisk=True)
+                if (pid.ok and pid.text()) or (version.ok and version.text()):
+                    device.capabilities.magisk = True
+                    break
+                time.sleep(5)
         if device.capabilities.magisk_environment_ready:
             return StepResult(
                 step_id=step.id,
@@ -620,6 +630,10 @@ class InstrumentationService:
                 tapped += 1
                 if tapped >= 3:
                     break
+                continue
+            # A slow emulator shows "System UI isn't responding"; dismissing it keeps
+            # the setup going instead of stalling until the deadline.
+            if self._tap_dialog(target.serial, ("wait", "close app", "close", "ok")):
                 continue
             ready = self._prober.root_shell(
                 target.serial, "ls /data/adb/magisk", magisk=True
@@ -687,7 +701,7 @@ class InstrumentationService:
 
     def _step_enable_zygisk(self, step: ProfileStep, target: TargetDevice) -> StepResult:
         device = self._probe(target)
-        if not device.capabilities.magisk:
+        if not self._magisk_available(target, device):
             return StepResult(
                 step_id=step.id,
                 action=step.action,
@@ -729,6 +743,28 @@ class InstrumentationService:
             state=ComponentState.ENABLED if result.ok else ComponentState.UNKNOWN,
             message="Zygisk disabled; reboot to apply" if result.ok else result.text(),
         )
+
+    def _magisk_available(
+        self, target: TargetDevice, device: DeviceInstrumentation | None = None
+    ) -> bool:
+        """Whether Magisk can run commands here, independent of the shell's su grant.
+
+        After a reboot Magisk has no stored policy for the shell user, so ``su -c``
+        is rejected until the app grants it; adbd root still reaches magiskd, and
+        that is what matters for installing modules and toggling Zygisk.
+        """
+        probe = device or self._probe(target)
+        if probe.capabilities.magisk:
+            return True
+        version = self._prober.root_shell(target.serial, "magisk -V", magisk=True)
+        if version.ok and version.text() and "not found" not in version.text().lower():
+            probe.capabilities.magisk = True
+            return True
+        pid = self._prober.root_shell(target.serial, "pidof magiskd", magisk=True)
+        if pid.ok and pid.text():
+            probe.capabilities.magisk = True
+            return True
+        return False
 
     def _step_install_lsposed(self, step: ProfileStep, target: TargetDevice) -> StepResult:
         # LSPosed refuses to install below API 27 (verified live: it aborts with
@@ -966,6 +1002,8 @@ class InstrumentationService:
         """Reboot the AVD and wait for it to come back, so later steps see the result."""
         budget = float(step.params.get("timeout_s", 300))
         self._prober.run(target.serial, "reboot")
+        # A guest reboot drops adbd's root state; re-establish it on the next root call.
+        self._prober.forget_root(target.serial)
         deadline = time.monotonic() + budget
         while True:
             remaining = deadline - time.monotonic()
@@ -1124,7 +1162,7 @@ class InstrumentationService:
         self, step: ProfileStep, target: TargetDevice, record: ModuleRecord
     ) -> StepResult:
         device = self._probe(target)
-        if not device.capabilities.magisk:
+        if not self._magisk_available(target, device):
             return StepResult(
                 step_id=step.id,
                 action=step.action,
