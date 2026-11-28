@@ -897,6 +897,34 @@ new service:
 | `su -c id` returns `context=u:r:su:s0`, not `u:r:magisk:s0` | that is the userdebug `su`/`adb root`, not Magisk | context field | Magisk is not installed; use `install_magisk` + `complete_magisk_setup` on a patched ramdisk |
 | `install_magisk` fails with "no Magisk installer is configured" | `AVDFLEET_MAGISK_INSTALLER` is unset | `echo $env:AVDFLEET_MAGISK_INSTALLER` | set it before starting the daemon; see [the installer section](#external-toolchain-avdfleet_magisk_installer) |
 
+### Emulator "Detected ADB" modal on every launch
+
+A modal **Detected ADB** ("The ADB binary found at `…\platform-tools\adb.exe` is obsolete
+and has serious performance problems…"), with a **Never show this again.** checkbox and an
+OK button, blocks the emulator window until it is dismissed. It is a false positive, not an
+out-of-date install: emulator 37.3.10 decides "obsolete" from the protocol version it parses
+out of `adb version`, and platform-tools **37.0.3** is the newest published release
+(`adb version` = 1.0.41 → protocol 41), so there is nothing newer to update to. Confirmed
+against a stub `adb` reporting `1.0.20` (protocol 20): the dialog appears naming that path,
+and stops appearing once the setting below is set.
+
+The checkbox is a per-user Qt (QSettings) value, **not** a file under `%USERPROFILE%\.android\`:
+REG_SZ `showAdbWarning` under `HKEY_CURRENT_USER\Software\Android Open Source Project\Emulator`
+(absent = default, enabled). Back the key up, then set it:
+
+```powershell
+reg export "HKCU\Software\Android Open Source Project" "$env:TEMP\aosp-emulator.reg" /y
+New-ItemProperty -Path 'HKCU:\Software\Android Open Source Project\Emulator' `
+  -Name showAdbWarning -Value 'false' -PropertyType String -Force
+```
+
+Manual equivalent: tick "Never show this again." and press OK once — that writes the same
+value. Extended Controls (…) → Settings → General → "Use detected ADB location" is a
+different setting (`set/autoFindAdb`) and does not silence this dialog.
+
+AVD Fleet could pre-seed `showAdbWarning=false` on a host before launching its emulators, so
+the operator never meets the dialog.
+
 ## Related documentation
 
 - [instrumentation-compatibility.md](instrumentation-compatibility.md): per-image
