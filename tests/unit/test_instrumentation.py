@@ -763,7 +763,8 @@ def test_import_url_refuses_plain_http_unless_allowed(library: ModuleLibrary) ->
     record = secure.import_url(url)
 
     assert record.source == "url"
-    assert record.source_url == url
+    # Provenance never stores query secrets (QA-16).
+    assert record.source_url == "https://modules.example.invalid/alpha.zip?token=<redacted>"
     assert record.name == "Alpha"
     assert calls == [(url, MAX_MODULE_BYTES)]
 
@@ -1838,8 +1839,15 @@ def test_install_lsposed_manager_reports_an_install_failure(
     assert "INSTALL_FAILED_INVALID_APK" in result.message
 
 
-def test_remove_lsposed_absent_is_a_noop(service: InstrumentationService) -> None:
+def test_remove_lsposed_absent_is_a_noop(
+    service: InstrumentationService, adb: ScriptedAdb
+) -> None:
+    adb.responses["[ -d /data/adb/modules/zygisk_lsposed ] && echo yes || echo no"] = (
+        1,
+        "no\n",
+    )
     step = ProfileStep(id="remove-lsposed", action=StepAction.REMOVE_LSPOSED)
+    assert service._prober is not None  # the fake answers "no" for an absent module
 
     result = service._step_remove_lsposed(step, _target())
 
@@ -1851,7 +1859,9 @@ def test_remove_lsposed_absent_is_a_noop(service: InstrumentationService) -> Non
 def test_remove_lsposed_writes_the_remove_marker(
     service: InstrumentationService, adb: ScriptedAdb
 ) -> None:
-    adb.responses["[ -d /data/adb/modules/zygisk_lsposed ] && echo yes"] = (0, "yes\n")
+    adb.responses[
+        "[ -d /data/adb/modules/zygisk_lsposed ] && echo yes || echo no"
+    ] = (0, "yes\n")
     adb.responses["touch /data/adb/modules/zygisk_lsposed/remove"] = (0, "")
     step = ProfileStep(id="remove-lsposed", action=StepAction.REMOVE_LSPOSED)
 

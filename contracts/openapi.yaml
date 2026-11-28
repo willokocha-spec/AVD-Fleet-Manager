@@ -1434,9 +1434,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Getinstrumentationcapabilities
+                $ref: '#/components/schemas/DevicesResponse'
         '401':
           content:
             application/json:
@@ -1455,6 +1453,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/instrumentation/scan:
     post:
       tags:
@@ -1473,9 +1483,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Scaninstrumentation
+                $ref: '#/components/schemas/DevicesResponse'
         '401':
           description: Unauthorized
           content:
@@ -1494,6 +1502,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: The request conflicts with the current state
           content:
@@ -1525,9 +1539,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Listinstrumentationmodules
+                $ref: '#/components/schemas/ModulesResponse'
         '401':
           content:
             application/json:
@@ -1546,6 +1558,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/instrumentation/modules/import:
     post:
       tags:
@@ -1558,7 +1582,7 @@ paths:
           content:
             application/json:
               schema:
-                title: Response Importinstrumentationmodule
+                $ref: '#/components/schemas/ModuleRecord'
         '401':
           description: Unauthorized
           content:
@@ -1567,6 +1591,12 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: The referenced object does not exist
           content:
             application/json:
               schema:
@@ -1639,9 +1669,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Listinstrumentationprofiles
+                $ref: '#/components/schemas/ProfilesResponse'
         '401':
           description: Unauthorized
           content:
@@ -1650,6 +1678,18 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
           content:
             application/json:
               schema:
@@ -1692,6 +1732,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: The request conflicts with the current state
           content:
@@ -1904,6 +1950,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: The request conflicts with the current state
           content:
@@ -1933,9 +1985,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Listinstrumentationdeployments
+                $ref: '#/components/schemas/RunsResponse'
         '401':
           content:
             application/json:
@@ -1954,6 +2004,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/instrumentation/deployments/{run_id}:
     get:
       tags:
@@ -1996,6 +2058,12 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
         '404':
           description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
           content:
             application/json:
               schema:
@@ -2082,9 +2150,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response Getinstrumentationdeploymentlogs
+                $ref: '#/components/schemas/LogsResponse'
         '401':
           content:
             application/json:
@@ -2109,6 +2175,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/instrumentation/toolchain:
     get:
       tags:
@@ -2121,9 +2193,7 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties: true
-                type: object
-                title: Response Getinstrumentationtoolchain
+                $ref: '#/components/schemas/ToolchainResponse'
         '401':
           description: Unauthorized
           content:
@@ -2132,6 +2202,18 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
           content:
             application/json:
               schema:
@@ -2238,6 +2320,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     put:
       tags:
       - instrumentation
@@ -2283,6 +2377,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          description: The referenced object does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The request conflicts with the current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   securitySchemes:
     bearerAuth:
@@ -3644,3 +3750,616 @@ components:
           default: ''
       type: object
       title: AutoProfileRequest
+    ToolchainResponse:
+      properties:
+        artifacts:
+          items:
+            $ref: '#/components/schemas/ArtifactStatus'
+          type: array
+          title: Artifacts
+        manifest:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Manifest
+        available:
+          type: boolean
+          title: Available
+      type: object
+      required:
+      - artifacts
+      - manifest
+      - available
+      title: ToolchainResponse
+    ArtifactStatus:
+      properties:
+        key:
+          type: string
+          title: Key
+        name:
+          type: string
+          title: Name
+        version:
+          type: string
+          title: Version
+        kind:
+          type: string
+          title: Kind
+        min_api:
+          type: integer
+          title: Min Api
+        source_url:
+          type: string
+          title: Source Url
+        pinned_sha256:
+          type: string
+          title: Pinned Sha256
+        pinned_size_bytes:
+          type: integer
+          title: Pinned Size Bytes
+        present:
+          type: boolean
+          title: Present
+          default: false
+        verified:
+          type: boolean
+          title: Verified
+          default: false
+        path:
+          type: string
+          title: Path
+          default: ''
+        size_bytes:
+          type: integer
+          title: Size Bytes
+          default: 0
+        sha256:
+          type: string
+          title: Sha256
+          default: ''
+        acquired_at:
+          type: string
+          title: Acquired At
+          default: ''
+      type: object
+      required:
+      - key
+      - name
+      - version
+      - kind
+      - min_api
+      - source_url
+      - pinned_sha256
+      - pinned_size_bytes
+      title: ArtifactStatus
+      description: Presence and integrity of one pinned artifact on this host.
+    LogsResponse:
+      properties:
+        logs:
+          items:
+            $ref: '#/components/schemas/LogEntry'
+          type: array
+          title: Logs
+      type: object
+      required:
+      - logs
+      title: LogsResponse
+    LogEntry:
+      properties:
+        id:
+          type: integer
+          title: Id
+          default: 0
+        run_id:
+          type: string
+          title: Run Id
+          default: ''
+        instance:
+          type: string
+          title: Instance
+          default: ''
+        level:
+          type: string
+          title: Level
+          default: info
+        message:
+          type: string
+          title: Message
+          default: ''
+        at:
+          type: string
+          format: date-time
+          title: At
+      type: object
+      title: LogEntry
+      description: One line of deployment/install log.
+    RunsResponse:
+      properties:
+        runs:
+          items:
+            $ref: '#/components/schemas/DeploymentRun'
+          type: array
+          title: Runs
+      type: object
+      required:
+      - runs
+      title: RunsResponse
+    DeploymentRun:
+      properties:
+        id:
+          type: string
+          title: Id
+        profile_id:
+          type: string
+          title: Profile Id
+          default: ''
+        label:
+          type: string
+          title: Label
+          default: ''
+        state:
+          $ref: '#/components/schemas/avdfleet__instrumentation__models__RunState'
+          default: queued
+        targets:
+          items:
+            type: string
+          type: array
+          title: Targets
+        results:
+          items:
+            $ref: '#/components/schemas/TargetResult'
+          type: array
+          title: Results
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        started_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Started At
+        finished_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Finished At
+        error:
+          type: string
+          title: Error
+          default: ''
+      type: object
+      required:
+      - id
+      title: DeploymentRun
+      description: One deployment of a profile across selected targets.
+    TargetResult:
+      properties:
+        instance:
+          type: string
+          title: Instance
+        ok:
+          type: boolean
+          title: Ok
+          default: false
+        skipped:
+          type: boolean
+          title: Skipped
+          default: false
+        error:
+          type: string
+          title: Error
+          default: ''
+        steps:
+          items:
+            $ref: '#/components/schemas/StepResult'
+          type: array
+          title: Steps
+      type: object
+      required:
+      - instance
+      title: TargetResult
+      description: Every step result for one AVD.
+    StepResult:
+      properties:
+        step_id:
+          type: string
+          title: Step Id
+        action:
+          $ref: '#/components/schemas/StepAction'
+        ok:
+          type: boolean
+          title: Ok
+        state:
+          $ref: '#/components/schemas/ComponentState'
+          default: unknown
+        message:
+          type: string
+          title: Message
+          default: ''
+        data:
+          additionalProperties: true
+          type: object
+          title: Data
+      type: object
+      required:
+      - step_id
+      - action
+      - ok
+      title: StepResult
+      description: Outcome of one step on one target.
+    ComponentState:
+      type: string
+      enum:
+      - absent
+      - installed
+      - enabled
+      - active
+      - unsupported
+      - unknown
+      title: ComponentState
+      description: Lifecycle state of one component (Magisk, Zygisk, LSPosed, a module).
+    avdfleet__instrumentation__models__RunState:
+      type: string
+      enum:
+      - queued
+      - running
+      - succeeded
+      - partial
+      - failed
+      - cancelled
+      title: RunState
+      description: State of one deployment run across several targets.
+    ProfilesResponse:
+      properties:
+        profiles:
+          items:
+            $ref: '#/components/schemas/InstrumentationProfile'
+          type: array
+          title: Profiles
+      type: object
+      required:
+      - profiles
+      title: ProfilesResponse
+    InstrumentationProfile:
+      properties:
+        id:
+          type: string
+          title: Id
+        name:
+          type: string
+          title: Name
+        description:
+          type: string
+          title: Description
+          default: ''
+        revision:
+          type: integer
+          title: Revision
+          default: 1
+        steps:
+          items:
+            $ref: '#/components/schemas/ProfileStep'
+          type: array
+          title: Steps
+        builtin:
+          type: boolean
+          title: Builtin
+          default: false
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - name
+      title: InstrumentationProfile
+      description: A reusable sequence of instrumentation steps.
+    ProfileStep:
+      properties:
+        id:
+          type: string
+          title: Id
+        action:
+          $ref: '#/components/schemas/StepAction'
+        module_id:
+          type: string
+          title: Module Id
+          default: ''
+        module_identifier:
+          type: string
+          title: Module Identifier
+          default: ''
+        params:
+          additionalProperties: true
+          type: object
+          title: Params
+      type: object
+      required:
+      - id
+      - action
+      title: ProfileStep
+      description: One step of an instrumentation profile.
+    ModuleRecord:
+      properties:
+        id:
+          type: string
+          title: Id
+        kind:
+          $ref: '#/components/schemas/ModuleKind'
+          default: unknown
+        name:
+          type: string
+          title: Name
+          default: ''
+        package_name:
+          type: string
+          title: Package Name
+          default: ''
+        version:
+          type: string
+          title: Version
+          default: ''
+        version_code:
+          type: integer
+          title: Version Code
+          default: 0
+        min_sdk:
+          type: integer
+          title: Min Sdk
+          default: 0
+        abi:
+          type: string
+          title: Abi
+          default: ''
+        description:
+          type: string
+          title: Description
+          default: ''
+        sha256:
+          type: string
+          title: Sha256
+        size_bytes:
+          type: integer
+          title: Size Bytes
+          default: 0
+        source:
+          type: string
+          title: Source
+          default: upload
+        source_url:
+          type: string
+          title: Source Url
+          default: ''
+        file_path:
+          type: string
+          title: File Path
+          default: ''
+        metadata:
+          additionalProperties: true
+          type: object
+          title: Metadata
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+        updated_at:
+          type: string
+          format: date-time
+          title: Updated At
+      type: object
+      required:
+      - id
+      - sha256
+      title: ModuleRecord
+      description: One artifact in the central module library.
+    ModuleKind:
+      type: string
+      enum:
+      - xposed_apk
+      - magisk_zip
+      - zygisk_zip
+      - lsposed_zip
+      - unknown
+      title: ModuleKind
+      description: What kind of package an imported artifact is.
+    ModulesResponse:
+      properties:
+        modules:
+          items:
+            $ref: '#/components/schemas/ModuleRecord'
+          type: array
+          title: Modules
+      type: object
+      required:
+      - modules
+      title: ModulesResponse
+    DevicesResponse:
+      properties:
+        devices:
+          items:
+            $ref: '#/components/schemas/DeviceInstrumentation'
+          type: array
+          title: Devices
+      type: object
+      required:
+      - devices
+      title: DevicesResponse
+    DeviceInstrumentation:
+      properties:
+        instance:
+          type: string
+          title: Instance
+        api_level:
+          type: integer
+          title: Api Level
+          default: 0
+        abi:
+          type: string
+          title: Abi
+          default: ''
+        image_id:
+          type: string
+          title: Image Id
+          default: ''
+        image_tag:
+          type: string
+          title: Image Tag
+          default: ''
+        serial:
+          type: string
+          title: Serial
+          default: ''
+        running:
+          type: boolean
+          title: Running
+          default: false
+        boot_completed:
+          type: boolean
+          title: Boot Completed
+          default: false
+        root_implementation:
+          $ref: '#/components/schemas/RootImplementation'
+          default: none
+        capabilities:
+          $ref: '#/components/schemas/CapabilityFlags'
+        xposed_modules:
+          items:
+            $ref: '#/components/schemas/InstalledModule'
+          type: array
+          title: Xposed Modules
+        magisk_modules:
+          items:
+            $ref: '#/components/schemas/InstalledModule'
+          type: array
+          title: Magisk Modules
+        compatible:
+          type: boolean
+          title: Compatible
+          default: false
+        blockers:
+          items:
+            type: string
+          type: array
+          title: Blockers
+        probed_at:
+          type: string
+          format: date-time
+          title: Probed At
+      type: object
+      required:
+      - instance
+      title: DeviceInstrumentation
+      description: A capability + module inventory snapshot for one AVD.
+    InstalledModule:
+      properties:
+        identifier:
+          type: string
+          title: Identifier
+          default: ''
+        kind:
+          $ref: '#/components/schemas/ModuleKind'
+          default: unknown
+        version:
+          type: string
+          title: Version
+          default: ''
+        enabled:
+          type: boolean
+          title: Enabled
+          default: true
+        active:
+          type: boolean
+          title: Active
+          default: false
+        source:
+          type: string
+          title: Source
+          default: ''
+        scope:
+          items:
+            type: string
+          type: array
+          title: Scope
+        notes:
+          items:
+            type: string
+          type: array
+          title: Notes
+      type: object
+      title: InstalledModule
+      description: One module as reported by a probed device.
+    CapabilityFlags:
+      properties:
+        adb_root:
+          type: boolean
+          title: Adb Root
+          default: false
+        writable_system:
+          type: boolean
+          title: Writable System
+          default: false
+        magisk:
+          type: boolean
+          title: Magisk
+          default: false
+        magisk_version:
+          type: string
+          title: Magisk Version
+          default: ''
+        magisk_environment_ready:
+          type: boolean
+          title: Magisk Environment Ready
+          default: false
+        zygisk_available:
+          type: boolean
+          title: Zygisk Available
+          default: false
+        zygisk_enabled:
+          type: boolean
+          title: Zygisk Enabled
+          default: false
+        zygisk_active:
+          type: boolean
+          title: Zygisk Active
+          default: false
+        lsposed_installed:
+          type: boolean
+          title: Lsposed Installed
+          default: false
+        lsposed_version:
+          type: string
+          title: Lsposed Version
+          default: ''
+        lsposed_active:
+          type: boolean
+          title: Lsposed Active
+          default: false
+        reboot_required:
+          type: boolean
+          title: Reboot Required
+          default: false
+        notes:
+          items:
+            type: string
+          type: array
+          title: Notes
+      type: object
+      title: CapabilityFlags
+      description: What a single device can actually do, measured rather than assumed.
+    RootImplementation:
+      type: string
+      enum:
+      - none
+      - adb_root
+      - magisk
+      title: RootImplementation
+      description: How root is obtained on a device.

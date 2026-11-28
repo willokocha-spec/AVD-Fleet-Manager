@@ -40,10 +40,12 @@ git@github.com:willokocha-spec/AVD-Fleet-Manager.git
 
 ## Release assets
 
-`dist/` contains the wheel, sdist, source archive and the Windows x64/ARM64
-portable ZIPs. They are intentionally **not committed** (`.gitignore` root `dist/`).
-Publish them through the GitHub Releases UI or `gh release upload`, with
-`dist/SHA256SUMS.txt`.
+`dist/` contains what the two builders produce: `python scripts/build_release.py`
+writes the wheel (and optional sdist), and `avdfleet bundle --offline -o <dir>`
+writes the portable **folder** (zip it yourself if you want an archive). They are
+intentionally **not committed** (`.gitignore` root `dist/`). Publish them through the
+GitHub Releases UI or `gh release upload`, and record checksums with
+`Get-FileHash`/`sha256sum` next to the assets.
 
 ## Before publishing any update
 

@@ -177,6 +177,13 @@ class InstrumentationService:
         profile_id = self._auto_map().get(instance)
         if not profile_id:
             return None
+        for candidate in self._repo.list_runs(50):
+            if (
+                candidate.profile_id == profile_id
+                and instance in candidate.targets
+                and candidate.state in (RunState.QUEUED, RunState.RUNNING)
+            ):
+                return None
         try:
             run = self.start_run(
                 profile_id=profile_id,
@@ -249,6 +256,8 @@ class InstrumentationService:
         if not parsed_steps:
             raise ValidationError("a profile needs at least one step")
         existing = self._repo.get_profile(profile_id) if profile_id else None
+        if profile_id and existing is None:
+            raise NotFoundError(f"profile not found: {profile_id}")
         if existing is not None and existing.builtin:
             raise ValidationError(f"profile {existing.name!r} is built in and cannot be edited")
         profile = InstrumentationProfile(
@@ -267,6 +276,14 @@ class InstrumentationService:
 
     def delete_profile(self, profile_id: str) -> None:
         self._repo.delete_profile(profile_id)
+        # Drop auto-start bindings pointing at the deleted profile.
+        if self._settings is not None and self._auto_map():
+            mapping = {
+                instance: profile
+                for instance, profile in self._auto_map().items()
+                if profile != profile_id
+            }
+            self._settings.set(self.AUTO_PROFILE_KEY, mapping)
 
     def clone_profile(self, profile_id: str, *, name: str = "") -> InstrumentationProfile:
         """Copy any profile (including a built-in) into an editable one.
@@ -357,6 +374,9 @@ class InstrumentationService:
         run = self._repo.get_run(run_id)
         if run is None:
             raise NotFoundError(f"deployment run not found: {run_id}")
+        if run.state is not RunState.QUEUED:
+            self._log(run.id, "", f"run is {run.state}; not executing it")
+            return run
         profile = self.get_profile(run.profile_id) if run.profile_id else None
         if profile is None:
             run.state = RunState.FAILED
@@ -474,6 +494,7 @@ class InstrumentationService:
             )
 
         result = TargetResult(instance=instance)
+        failed_steps: list[StepResult] = []
         for step in profile.steps:
             if cancellation.is_set():
                 result.ok = False
@@ -487,10 +508,17 @@ class InstrumentationService:
                 f"{step.action}: {'ok' if step_result.ok else 'failed'} - {step_result.message}",
                 level="info" if step_result.ok else "error",
             )
-            if not step_result.ok and step.params.get("continue_on_error") is not True:
-                result.ok = False
-                result.error = step_result.message
-                return result
+            if not step_result.ok:
+                failed_steps.append(step_result)
+                if step.params.get("continue_on_error") is not True:
+                    result.ok = False
+                    result.error = step_result.message
+                    return result
+        if failed_steps:
+            # continue_on_error keeps going, but the target is still not ok.
+            result.ok = False
+            result.error = "; ".join(item.message for item in failed_steps)
+            return result
         result.ok = True
         return result
 
@@ -771,7 +799,9 @@ class InstrumentationService:
         # "Unsupported Android version"). Fail early with the reason instead of
         # pushing a module the framework will reject.
         minimum = find_artifact("lsposed").min_api
-        if target.api_level and target.api_level < minimum:
+        probed = self._probe(target)
+        level = target.api_level or probed.api_level
+        if level and level < minimum:
             return StepResult(
                 step_id=step.id,
                 action=step.action,
@@ -779,17 +809,36 @@ class InstrumentationService:
                 state=ComponentState.UNSUPPORTED,
                 message=(
                     f"LSPosed requires Android API {minimum} or newer;"
-                    f" this AVD is API {target.api_level}"
+                    f" this AVD is API {level}"
                 ),
             )
         record = self._module_for(step, ModuleKind.LSPOSED_ZIP, "LSPosed")
         return self._install_magisk_module(step, target, record)
 
     def _step_install_module(self, step: ProfileStep, target: TargetDevice) -> StepResult:
-        record = self._module_for(step, None, "module")
+        try:
+            record = self._module_for(step, None, "module")
+        except ValidationError as exc:
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.UNKNOWN,
+                message=exc.message,
+            )
+
         if record.kind is ModuleKind.XPOSED_APK:
             return self._install_xposed_apk(step, target, record)
-        return self._install_magisk_module(step, target, record)
+        try:
+            return self._install_magisk_module(step, target, record)
+        except ValidationError as exc:
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.UNKNOWN,
+                message=exc.message,
+            )
 
     def _step_enable_module(self, step: ProfileStep, target: TargetDevice) -> StepResult:
         return self._module_marker(step, target, enable=True)
@@ -798,7 +847,17 @@ class InstrumentationService:
         return self._module_marker(step, target, enable=False)
 
     def _step_remove_module(self, step: ProfileStep, target: TargetDevice) -> StepResult:
-        identifier = self._module_identifier(step)
+        try:
+            identifier = self._module_identifier(step)
+        except ValidationError as exc:
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.UNKNOWN,
+                message=exc.message,
+            )
+
         result = self._root_shell(
             target, f"touch /data/adb/modules/{identifier}/remove", magisk=True
         )
@@ -1001,7 +1060,21 @@ class InstrumentationService:
     def _step_reboot(self, step: ProfileStep, target: TargetDevice) -> StepResult:
         """Reboot the AVD and wait for it to come back, so later steps see the result."""
         budget = float(step.params.get("timeout_s", 300))
-        self._prober.run(target.serial, "reboot")
+        before = self._prober.shell(
+            target.serial, "cat /proc/sys/kernel/random/boot_id"
+        )
+        previous = before.text().strip() if before.ok else ""
+        issued = self._prober.run(target.serial, "reboot")
+        if not issued.ok:
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                message=(
+                    "the reboot command failed: "
+                    f"{issued.text() or issued.stderr or issued.returncode}"
+                ),
+            )
         # A guest reboot drops adbd's root state; re-establish it on the next root call.
         self._prober.forget_root(target.serial)
         deadline = time.monotonic() + budget
@@ -1012,7 +1085,16 @@ class InstrumentationService:
             # Never sleep past the caller's budget.
             time.sleep(min(5.0, remaining))
             boot = self._prober.shell(target.serial, "getprop sys.boot_completed")
-            if boot.ok and boot.text().strip() == "1":
+            current = self._prober.shell(
+                target.serial, "cat /proc/sys/kernel/random/boot_id"
+            )
+            rebooted = bool(
+                previous
+                and current.ok
+                and current.text().strip()
+                and current.text().strip() != previous
+            )
+            if boot.ok and boot.text().strip() == "1" and (rebooted or not previous):
                 return StepResult(
                     step_id=step.id,
                     action=step.action,
@@ -1031,14 +1113,28 @@ class InstrumentationService:
     def _step_remove_lsposed(self, step: ProfileStep, target: TargetDevice) -> StepResult:
         """Queue the LSPosed module for removal at the next boot."""
         base = "/data/adb/modules/zygisk_lsposed"
-        exists = self._root_shell(target, f"[ -d {base} ] && echo yes", magisk=True)
-        if "yes" not in exists.stdout.lower():
+        exists = self._root_shell(
+            target, f"[ -d {base} ] && echo yes || echo no", magisk=True
+        )
+        definitely_absent = "no" in exists.stdout.lower() and "yes" not in exists.stdout.lower()
+        if definitely_absent:
             return StepResult(
                 step_id=step.id,
                 action=step.action,
                 ok=True,
                 state=ComponentState.ABSENT,
                 message="LSPosed is not installed",
+            )
+        if not (exists.ok and exists.stdout.strip()):
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.UNKNOWN,
+                message=(
+                    "could not determine whether LSPosed is installed: "
+                    f"{exists.text() or exists.stderr or 'no root access'}"
+                ),
             )
         result = self._root_shell(target, f"touch {base}/remove", magisk=True)
         return StepResult(
@@ -1078,11 +1174,17 @@ class InstrumentationService:
             "lsposed_active": caps.lsposed_active,
         }
         expected = step.params.get("expect") or {}
+        unknown = [
+            name
+            for name, value in expected.items()
+            if name not in checks or not isinstance(value, bool)
+        ]
         failed = [
             name
             for name, value in checks.items()
-            if expected.get(name) is True and not value
+            if isinstance(expected.get(name), bool) and expected[name] is not value
         ]
+        failed.extend(unknown)
         return StepResult(
             step_id=step.id,
             action=step.action,
@@ -1149,13 +1251,13 @@ class InstrumentationService:
 
     def _module_identifier(self, step: ProfileStep) -> str:
         if step.module_identifier:
-            return step.module_identifier
+            return _validate_module_id(step.module_identifier)
         if step.module_id:
             record = self.get_module(step.module_id)
             prop = record.metadata.get("module_prop") or {}
             identifier = prop.get("id") or record.package_name
             if identifier:
-                return str(identifier)
+                return _validate_module_id(str(identifier))
         raise ValidationError("this step needs a module identifier")
 
     def _install_magisk_module(
@@ -1181,7 +1283,21 @@ class InstrumentationService:
             )
         install = self._root_shell(target, f"magisk --install-module {remote}", magisk=True)
         prop = record.metadata.get("module_prop") or {}
-        identifier = str(prop.get("id") or "")
+        raw_identifier = str(prop.get("id") or "") or _module_id_from_archive(
+            record.file_path
+        )
+        identifier = _validate_module_id(raw_identifier) if raw_identifier else ""
+        if not identifier:
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.INSTALLED,
+                message=(
+                    "the archive declares no module id, so the install cannot be verified;"
+                    " add id=<name> to its module.prop"
+                ),
+            )
         present = False
         if identifier:
             check = self._root_shell(
@@ -1241,8 +1357,30 @@ class InstrumentationService:
     def _module_marker(
         self, step: ProfileStep, target: TargetDevice, *, enable: bool
     ) -> StepResult:
-        identifier = self._module_identifier(step)
+        try:
+            identifier = self._module_identifier(step)
+        except ValidationError as exc:
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.UNKNOWN,
+                message=exc.message,
+            )
+
         base = f"/data/adb/modules/{identifier}"
+        present = self._root_shell(target, f"[ -d {base} ] && echo yes", magisk=True)
+        if not (present.ok and "yes" in present.stdout.lower()):
+            return StepResult(
+                step_id=step.id,
+                action=step.action,
+                ok=False,
+                state=ComponentState.ABSENT,
+                message=(
+                    f"module {identifier} is not installed under /data/adb/modules, so it"
+                    " cannot be enabled or disabled"
+                ),
+            )
         command = (
             f"rm -f {base}/{DISABLE_MARKER}"
             if enable
@@ -1299,6 +1437,29 @@ class InstrumentationService:
 
 DISABLE_MARKER = "disable"
 
+
+def _module_id_from_archive(path: str) -> str:
+    """Read ``module.prop`` out of a stored module ZIP and return its id.
+
+    Archives whose metadata was not captured at import time are still verified after
+    installation; without an id the presence check would have to be waived, so the id
+    is derived here instead.
+    """
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if "module.prop" not in archive.namelist():
+                return ""
+            text = archive.read("module.prop").decode("utf-8", "replace")
+    except (OSError, zipfile.BadZipFile):
+        return ""
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "id":
+            return value.strip()
+    return ""
+
 _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
 
@@ -1348,6 +1509,25 @@ def _bounds_center(value: str) -> tuple[int, int] | None:
     return ((x1 + x2) // 2, (y1 + y2) // 2)
 
 _PACKAGE_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$")
+
+#: Magisk module ids are directory names: letters, digits, dot, underscore, dash.
+_MODULE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _validate_module_id(value: str) -> str:
+    """Reject a module id that could escape or inject into a root shell command.
+
+    The id is interpolated into ``/data/adb/modules/<id>`` paths that run as root,
+    so this is the shell-injection boundary for ids coming from an imported ZIP's
+    ``module.prop`` as well as from a profile step.
+    """
+    candidate = (value or "").strip()
+    if not _MODULE_ID_PATTERN.match(candidate) or candidate in {".", ".."}:
+        raise ValidationError(
+            f"invalid Magisk module id: {value!r}",
+            hint="module ids may contain letters, digits, dot, underscore and dash",
+        )
+    return candidate
 
 
 def _validate_package(value: str, what: str) -> str:

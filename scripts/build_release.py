@@ -11,6 +11,7 @@ there, then builds a wheel and verifies the critical data files are inside it.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -21,8 +22,24 @@ ROOT = Path(__file__).resolve().parents[1]
 UI = ROOT / "ui"
 STATIC = ROOT / "src" / "avdfleet" / "api" / "static"
 DIST = ROOT / "dist"
-NODE = Path(r"C:\Users\lab\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe")
-PNPM = Path(r"C:\Users\lab\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.mjs")
+# Toolchain is discovered, not hardcoded: set AVDFLEET_NODE / AVDFLEET_PNPM to
+# override, otherwise the PATH is used. PNPM may be a .mjs script that needs node.
+NODE = os.environ.get("AVDFLEET_NODE") or shutil.which("node") or ""
+PNPM = os.environ.get("AVDFLEET_PNPM") or shutil.which("pnpm") or ""
+
+
+def pnpm_command(*args: str) -> list[str]:
+    """Build a command for pnpm, whether it is a shim or a .mjs script."""
+    if not PNPM:
+        raise SystemExit(
+            "pnpm not found; install it or set AVDFLEET_PNPM (and AVDFLEET_NODE"
+            " when pointing at pnpm.mjs)"
+        )
+    if PNPM.endswith(".mjs"):
+        if not NODE:
+            raise SystemExit("node not found; set AVDFLEET_NODE")
+        return [NODE, PNPM, *args]
+    return [PNPM, *args]
 
 
 def run(command: list[str], cwd: Path) -> None:
@@ -31,10 +48,8 @@ def run(command: list[str], cwd: Path) -> None:
 
 
 def build_ui() -> None:
-    if not PNPM.exists():
-        raise SystemExit(f"pnpm not found at {PNPM}")
-    run([str(NODE), str(PNPM), "install", "--frozen-lockfile"], UI)
-    run([str(NODE), str(PNPM), "build"], UI)
+    run(pnpm_command("install", "--frozen-lockfile"), UI)
+    run(pnpm_command("build"), UI)
 
 
 def copy_static() -> None:

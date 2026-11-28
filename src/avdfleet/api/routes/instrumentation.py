@@ -18,7 +18,15 @@ from avdfleet.core.config import API_PREFIX
 from avdfleet.core.errors import ValidationError
 from avdfleet.core.logging import get_logger
 from avdfleet.instrumentation import ModuleKind, StepAction
-from avdfleet.instrumentation.models import RunState
+from avdfleet.instrumentation.acquire import ArtifactStatus
+from avdfleet.instrumentation.models import (
+    DeploymentRun,
+    DeviceInstrumentation,
+    InstrumentationProfile,
+    LogEntry,
+    ModuleRecord,
+    RunState,
+)
 
 from ..container import ContainerAdapter, ServiceUnavailable
 from ..deps import ContainerDep, require_auth
@@ -55,6 +63,32 @@ def _split_targets(values: list[str] | None) -> list[str]:
 
 class ScanRequest(BaseModel):
     targets: list[str] = Field(default_factory=list)
+
+
+class DevicesResponse(BaseModel):
+    devices: list[DeviceInstrumentation]
+
+
+class ModulesResponse(BaseModel):
+    modules: list[ModuleRecord]
+
+
+class ProfilesResponse(BaseModel):
+    profiles: list[InstrumentationProfile]
+
+
+class RunsResponse(BaseModel):
+    runs: list[DeploymentRun]
+
+
+class LogsResponse(BaseModel):
+    logs: list[LogEntry]
+
+
+class ToolchainResponse(BaseModel):
+    artifacts: list[ArtifactStatus]
+    manifest: list[dict[str, Any]]
+    available: bool
 
 
 class StepBody(BaseModel):
@@ -105,6 +139,7 @@ class AutoProfileRequest(BaseModel):
     "/instrumentation/capabilities",
     operation_id="getInstrumentationCapabilities",
     summary="Probe root/instrumentation capabilities",
+    response_model=DevicesResponse,
 )
 def get_capabilities(
     container: ContainerDep, targets: list[str] | None = Query(default=None)
@@ -123,6 +158,7 @@ def get_capabilities(
     "/instrumentation/scan",
     operation_id="scanInstrumentation",
     summary="Probe several AVDs and return their instrumentation state",
+    response_model=DevicesResponse,
 )
 def post_scan(container: ContainerDep, payload: ScanRequest) -> dict[str, Any]:
     service = _service(container)
@@ -141,6 +177,7 @@ def post_scan(container: ContainerDep, payload: ScanRequest) -> dict[str, Any]:
     "/instrumentation/modules",
     operation_id="listInstrumentationModules",
     summary="List the central module library",
+    response_model=ModulesResponse,
 )
 def list_modules(container: ContainerDep, kind: str | None = Query(default=None)) -> dict[str, Any]:
     service = _service(container)
@@ -164,6 +201,7 @@ def list_modules(container: ContainerDep, kind: str | None = Query(default=None)
     "/instrumentation/modules/import",
     operation_id="importInstrumentationModule",
     summary="Import an APK or ZIP into the module library",
+    response_model=ModuleRecord,
 )
 async def import_module(container: ContainerDep, request: Request) -> Any:
     service = _service(container)
@@ -176,7 +214,14 @@ async def import_module(container: ContainerDep, request: Request) -> Any:
         data = await upload.read()  # type: ignore[union-attr]
         record = service.import_upload(getattr(upload, "filename", "") or "module.bin", data)
         return record
-    payload = ImportPathRequest.model_validate(await request.json())
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise ValidationError(
+            "the request body is not valid JSON",
+            hint="send a multipart 'file', or JSON with 'path' or 'url'",
+        ) from exc
+    payload = ImportPathRequest.model_validate(body)
     if payload.url:
         return service.import_url(payload.url)
     if payload.path:
@@ -202,6 +247,7 @@ def delete_module(container: ContainerDep, module_id: str) -> Response:
     "/instrumentation/toolchain",
     operation_id="getInstrumentationToolchain",
     summary="Pinned upstream artifacts and their local status",
+    response_model=ToolchainResponse,
 )
 def get_toolchain(container: ContainerDep) -> dict[str, Any]:
     return _service(container).toolchain_status()
@@ -228,6 +274,7 @@ def acquire_toolchain(
     "/instrumentation/profiles",
     operation_id="listInstrumentationProfiles",
     summary="List instrumentation profiles",
+    response_model=ProfilesResponse,
 )
 def list_profiles(container: ContainerDep) -> dict[str, Any]:
     service = _service(container)
@@ -349,6 +396,7 @@ def create_deployment(container: ContainerDep, payload: DeployRequest) -> Any:
     "/instrumentation/deployments",
     operation_id="listInstrumentationDeployments",
     summary="List recent deployments",
+    response_model=RunsResponse,
 )
 def list_deployments(container: ContainerDep, limit: int = Query(default=50, ge=1, le=500)) -> dict[str, Any]:
     service = _service(container)
@@ -377,6 +425,7 @@ def cancel_deployment(container: ContainerDep, run_id: str) -> Any:
     "/instrumentation/deployments/{run_id}/logs",
     operation_id="getInstrumentationDeploymentLogs",
     summary="Deployment logs",
+    response_model=LogsResponse,
 )
 def get_deployment_logs(
     container: ContainerDep,

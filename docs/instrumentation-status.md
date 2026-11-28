@@ -37,6 +37,10 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 | 15 | GUI acquisition UI + Xposed step actions/inventory | done | Toolchain panel in two tabs; profile editor offers `complete_magisk_setup`, `enable_xposed_module`, `set_xposed_scope`; module table renders `scope` |
 | 16 | Rebuild the shipped GUI bundle into `src/avdfleet/api/static/` | done | `index-C3UtynXb.js` (581.94 kB) + `index-CKQTONAt.css`; old `index-Cj2XS7za.js` removed; `index.html` references match |
 | 17 | **Unattended Magisk setup** (`complete_magisk_setup`) | done | installs the acquired APK, drives the dialog via `uiautomator dump` + `input tap`, waits for the self-reboot, verifies `/data/adb/magisk`; added to the three Magisk profiles |
+| 22 | QA review (16 defects from an independent reviewer) | done | all 16 fixed; `tests/qa` is green and stays as the regression suite |
+| 23 | Contract typed end to end | done | all instrumentation responses now have named schemas; 0 free-form instrumentation paths; 72 paths / 91 operations |
+| 24 | APK import on Windows (leaked mkstemp fd) | done | `_badging` closes the descriptor before unlink; verified by importing an Xposed-marked APK |
+| 25 | `scripts/build_release.py` hardcoded toolchain path | done | node/pnpm discovered from PATH or AVDFLEET_NODE/AVDFLEET_PNPM |
 | 21 | Lifecycle automation (instance -> profile on start) | done | settings-backed mapping, queued on `instances start` / `wait-boot`, persists across restarts; live smoke test passed |
 | 19 | Root/writable-system/manager/reboot/remove steps | done | `enable_adb_root`, `enable_writable_system`, `install_lsposed_manager`, `reboot`, `remove_lsposed`, `remove_magisk` (refuses, with guidance) |
 | 20 | WebSocket events for deployments | done | `EventType.INSTRUMENTATION_RUN` with `started`/`finished`; publish failures never break a run |
@@ -103,3 +107,55 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 2. `uv run ruff check src tests && uv run mypy` — must stay clean.
 3. `cd ui && pnpm typecheck && pnpm lint && pnpm build && pnpm test`.
 4. Next unfinished task is the lowest-numbered row that is not `done`.
+
+## Portable edition check
+
+- **Build:** `python scripts/build_release.py --no-sdist` produced only `dist/avdfleet-0.1.0-py3-none-any.whl` (919,759 B); the script has no portable-bundle step (`scripts/build_release.py:100-111`), despite README:215 and `docs/portable.md:75-88`. `--build-ui` dies at `scripts/build_release.py:24-25` (hardcoded `C:\Users\lab\...` pnpm).
+- **Portable build:** `avdfleet bundle --offline -o <tmp>` produced a folder (300,636,387 B manifest total, 7,335 entries, 288.1 MiB); the project has no zip step, so no zipped portable artifact is reproducible.
+- **Daemon:** bundle Python `-m avdfleet serve --portable --port 8791` with a temp data dir: `/health` OK; 5 built-in profiles; both pinned toolchain entries (magisk 26.1, lsposed 1.9.2, `present=false`).
+- **Modules:** crafted `module.prop` + `zygisk/` ZIP imported as `mod_6e52157ee4e6b571` (`zygisk_zip`, SHA-256 match), stored under `<data>/instrumentation/modules/<sha>/`, listed, then DELETE 204 removed row and file.
+- **aapt2 / APK (genuine Windows limitation):** `find_aapt2` resolves `<bundle>/sdk/build-tools/36.0.0/aapt2.exe` and direct badging reads `com.topjohnwu.magisk` 26.1/26100, but an Xposed-marked APK through the daemon returns **HTTP 500**: `src/avdfleet/instrumentation/library.py:231` drops the open `mkstemp()` fd, so `:245` unlink raises `PermissionError [WinError 32]`; no metadata is stored. Not a portable-path defect, but it breaks the Windows portable build.
+- **Other limits:** without an SDK (docs say it is not shipped) the same APK imports as `xposed_apk` with empty package/version and no `badging` (`library.py:94-114`, `:227-228`); a marker-less ordinary APK imports as `unknown` with empty package/version before `_badging` runs (`:203-208`) — design, not aapt2.
+- **Cleanup:** both daemons stopped; 8791/8792 free; temp data dirs and leaked aapt temp files deleted; 8765/emulators untouched.
+
+## Xposed write verification
+
+The two LSPosed database **write** steps were exercised on a throwaway API-34
+`google_apis;x86_64` AVD (`xposed-probe`, 4096 MiB) with a purpose-built Xposed
+APK (`com.avdfleet.probe`, built in `%TEMP%` with build-tools 36.0.0 + a debug
+keystore, imported as `mod_957a949008704781`).
+
+| Check | Result |
+| --- | --- |
+| `install_module` of the bound APK | **verified** — `ok=True`, `state=installed`; `lspd` registered `mid=2 / com.avdfleet.probe / enabled=0` |
+| `enable_xposed_module` (`enabled=true`) | **verified** — `ok=True`, `state=enabled`; `modules.enabled` read back as `1` through `sqlite3` on the device |
+| `set_xposed_scope` (`apps=[com.android.chrome]`, `replace=true`) | **verified** — `ok=True`, `state=enabled`; `scope` row `2|com.android.chrome|0` |
+| `service.scan()` after the writes | **verified** — root `magisk`, LSPosed `v1.9.2 (7024)` active; `xposed_modules` lists `com.avdfleet.probe` with `enabled=true`, `scope=["com.android.chrome"]` |
+| unregistered package (`com.example.missing`) | **verified** — `ok=False`, `state=unsupported` |
+| undotted name (`lspd`) | **verified** — `ok=False`, validation message `invalid Android package: 'lspd'` |
+
+Defects observed while verifying (not fixed here; `src/**` untouched by this pass):
+
+- `service.py:490-494` (`_execute_target`): with `continue_on_error=true`, a run
+  whose **every** step failed still reports `result.ok=True` and the run state
+  `succeeded` (seen with `irun_79e7ec4faaa9`). `result.ok` should be
+  `all(step.ok ...)` and the run should be `failed`/`partial`. Failing test:
+  a two-step profile with `continue_on_error` on both and two failing steps must
+  not report `succeeded`.
+- `service.py:648-675` vs `:1026` (`complete_magisk_setup`): the post-setup wait
+  never calls `Prober.forget_root()`, so an app-initiated reboot leaves a stale
+  adbd-root cache and `ls /data/adb/magisk` then runs through a non-root shell.
+  Observed: the step failed ("did not complete unattended") while
+  `/data/adb/magisk` was in fact populated and `magisk -V` returned 26100; a
+  fresh process reported "the Magisk environment is already complete".
+- `library.py:220-230`: an APK whose only Xposed marker is the manifest
+  `xposedmodule` meta-data imports as `unknown` (the module docstring says
+  manifest meta-data counts, the code only scans archive entries). LSPosed does
+  register such a module, so `install_module` would refuse it. Failing test:
+  import a meta-data-only APK and expect `ModuleKind.XPOSED_APK`.
+- `capabilities.py:432` (`probe`): Magisk is only detected when `su -c id`
+  succeeds; on a device where shell `su` is denied the scan reports
+  `root=adb_root`, `magisk=False` and no `xposed_modules`, even though `lspd`
+  runs. Running `adb root` first makes the same call report `magisk`. Consider
+  probing through `root_shell(..., magisk=True)` (which has the adbd-root
+  fallback) instead of a bare `su -c id`.

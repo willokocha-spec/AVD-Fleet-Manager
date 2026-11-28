@@ -72,20 +72,28 @@ Exit codes: `0` built, `1` failure, `2` usage, `3` environment (missing
 components/cache), `4` not found, `5` conflict (non-empty destination without
 `--force`).
 
-### Prebuilt Windows bundles from this build
+### Building a portable bundle
 
-`dist/` contains ready-to-run archives produced on this host:
+There are no prebuilt archives in this repository, and `scripts/build_release.py`
+does **not** produce one — it builds the wheel and optional sdist only. The portable
+bundle is built with the `bundle` command, which writes a **folder** (not a zip):
 
-- `AVD-Fleet-Portable-Windows-x64.zip` — Windows 10/11 x64 (recommended; can run AVDs
-  once an x64 Android SDK is installed)
-- `AVD-Fleet-Portable-Windows-arm64.zip` — Windows 11 ARM64 (management/UI only; the
-  Android emulator has no Windows ARM64 build)
+```bash
+avdfleet bundle --offline -o C:/tmp/AVD-Fleet-Portable
+```
 
-Extract anywhere writable, then double-click `AVD Fleet.cmd`. The archives include a
-pinned Python 3.12 runtime, application code, GUI and launcher; no system Python is
-needed. The Android SDK is not included for licensing/size reasons — install it with
-`avdfleet install --sdk-root <bundle>/sdk` on an x64 host, or copy a licensed SDK in.
-`SHA256SUMS.txt` is next to the archives.
+`--offline` requires a prepared cache (a uv-managed Python, an Android SDK
+build-tools + platform-tools tree, a built `ui/dist` and the resolved dependency
+tree); without it the command prepares those itself. Zip the folder yourself if you
+need an archive for distribution, and keep the SDK out of it for licensing reasons —
+the bundle resolves `<bundle>/sdk` at runtime, so install one with
+`avdfleet install --sdk-root <bundle>/sdk` on an x64 host.
+
+Verified on 2026-11-27: a bundle built with `--offline` measured 300,636,387 bytes
+across 7,335 manifest entries (about 288 MiB on disk), served the daemon on a
+non-default port, exposed the five built-in profiles and both pinned toolchain
+artifacts, and imported and deleted a Magisk module ZIP. See
+[instrumentation-status.md](instrumentation-status.md) for the recorded result.
 
 ## First run
 

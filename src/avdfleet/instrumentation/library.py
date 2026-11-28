@@ -114,6 +114,28 @@ def find_aapt2(sdk_root: str | Path | None) -> str | None:
     return str(candidates[0][1])
 
 
+#: Magisk module ids are directory names: letters, digits, dot, underscore, dash.
+_MODULE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _safe_url(url: str) -> str:
+    """Strip credentials and query values before a URL becomes provenance.
+
+    ``source_url`` is persisted and served by the API, so a credentialed or
+    signed URL must not be stored verbatim.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    query = "&".join(
+        f"{item.split('=', 1)[0]}=<redacted>" for item in parts.query.split("&") if item
+    )
+    return urlunsplit((parts.scheme, host, parts.path, query, ""))
+
+
 class ModuleLibrary:
     """Import, inspect and store instrumentation packages."""
 
@@ -201,11 +223,15 @@ class ModuleLibrary:
                 ]
                 metadata["xposed_markers"] = markers + sorted(set(xposed_entries))
                 if not markers and not xposed_entries:
-                    metadata["note"] = (
-                        "no Xposed markers found; this is an ordinary APK, so it cannot be"
-                        " installed as an Xposed module"
-                    )
-                    return ModuleKind.UNKNOWN, metadata
+                    # Modern modules declare <meta-data android:name="xposedmodule">.
+                    if self._declares_xposed_meta(data):
+                        metadata["xposed_meta_data"] = True
+                    else:
+                        metadata["note"] = (
+                            "no Xposed markers found; this is an ordinary APK, so it"
+                            " cannot be installed as an Xposed module"
+                        )
+                        return ModuleKind.UNKNOWN, metadata
                 info = self._badging(data)
                 if info is not None:
                     metadata["badging"] = {
@@ -222,13 +248,53 @@ class ModuleLibrary:
             hint="expected AndroidManifest.xml (APK) or module.prop (Magisk module)",
         )
 
+    def _declares_xposed_meta(self, data: bytes) -> bool:
+        """Whether the APK's manifest declares the ``xposedmodule`` meta-data."""
+        if not self._aapt:
+            return False
+        import os
+        import tempfile
+
+        descriptor, name = tempfile.mkstemp(suffix=".apk")
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            temporary.write_bytes(data)
+            completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                [
+                    self._aapt,
+                    "dump",
+                    "xmltree",
+                    "--file",
+                    "AndroidManifest.xml",
+                    str(temporary),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("aapt2 could not read the manifest: %s", exc)
+            return False
+        finally:
+            temporary.unlink(missing_ok=True)
+        if completed.returncode != 0:
+            return False
+        return "xposedmodule" in completed.stdout.lower()
+
     def _badging(self, data: bytes) -> AaptInfo | None:
         """Run ``aapt2 dump badging`` on the APK bytes, when aapt is available."""
         if not self._aapt:
             return None
+        import os
         import tempfile
 
-        temporary = Path(tempfile.mkstemp(suffix=".apk")[1])
+        descriptor, name = tempfile.mkstemp(suffix=".apk")
+        # Close the descriptor first: an open handle makes the later unlink
+        # fail on Windows (WinError 32) and the import then 500s.
+        os.close(descriptor)
+        temporary = Path(name)
         try:
             temporary.write_bytes(data)
             completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
@@ -313,7 +379,9 @@ class ModuleLibrary:
         fetch = self._http_get or _default_http_get
         data = fetch(parsed, MAX_MODULE_BYTES)
         filename = Path(parsed.split("?", 1)[0]).name or "module.bin"
-        return self.build_record(data, filename, source="url", source_url=parsed)
+        return self.build_record(
+            data, filename, source="url", source_url=_safe_url(parsed)
+        )
 
 
 def _default_http_get(url: str, limit: int) -> bytes:  # pragma: no cover - network

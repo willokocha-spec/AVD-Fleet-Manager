@@ -424,7 +424,6 @@ def start_instance(
         headless=body.headless,
         dry_run=body.dry_run,
     )
-    _launch_auto_profile(container, name)
     return info
 
 

@@ -184,6 +184,16 @@ class DeviceProber:
         return self.shell(serial, command)
 
     # -- individual probes ----------------------------------------------
+    def _magisk_payload_present(self, serial: str) -> bool:
+        """Whether magiskd answers through adbd root, even if shell su is denied."""
+        if not self._allow_adb_root:
+            return False
+        version = self.root_shell(serial, "magisk -V", magisk=True)
+        if version.ok and version.text() and "not found" not in version.text().lower():
+            return True
+        pid = self.root_shell(serial, "pidof magiskd", magisk=True)
+        return bool(pid.ok and pid.text())
+
     def props(self, serial: str) -> dict[str, str]:
         result = self.shell(serial, "getprop")
         props: dict[str, str] = {}

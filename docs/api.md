@@ -2,7 +2,7 @@
 
 The daemon exposes a REST API under `/api/v1` plus two WebSocket endpoints. The
 frozen OpenAPI 3.1 contract is checked in at
-[contracts/openapi.yaml](../contracts/openapi.yaml) (71 paths, 89 operations) and
+[contracts/openapi.yaml](../contracts/openapi.yaml) (72 paths, 91 operations) and
 served by a running daemon at `/openapi.json`, with interactive docs at `/docs`
 (disable with `AVDFLEET_DOCS=0`).
 
@@ -155,6 +155,8 @@ See [security.md](security.md) for the full security model.
 | `DELETE /api/v1/instrumentation/modules/{module_id}` | Remove a library record and its stored copy |
 | `GET /api/v1/instrumentation/toolchain` | Pinned artifacts, local presence/integrity, provenance manifest |
 | `POST /api/v1/instrumentation/toolchain/{key}/acquire` | Download/verify one pinned release (`{"confirm": true}`; `409` without it, `422` on a size/hash mismatch, `404` for an unknown key) |
+| `GET /api/v1/instrumentation/instances/{name}/auto-profile` | Profile applied automatically when the AVD boots |
+| `PUT /api/v1/instrumentation/instances/{name}/auto-profile` | Bind or clear that profile (`{"profile_id": "…"}`; empty clears) |
 | `GET /api/v1/instrumentation/profiles` / `POST /api/v1/instrumentation/profiles` | List / create profiles |
 | `PUT/DELETE /api/v1/instrumentation/profiles/{profile_id}` | Update / delete a user profile |
 | `POST /api/v1/instrumentation/profiles/{profile_id}/clone` | Copy any profile into an editable one |

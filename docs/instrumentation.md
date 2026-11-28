@@ -81,6 +81,41 @@ returns; the older notice claiming scope was not reported has been removed. The
 profile editor exposes every step action, including the Xposed database steps, the
 root/writable-system actions and `reboot`.
 
+### Hardening after independent review
+
+An independent QA pass wrote one failing test per defect (`tests/qa/`, 16 tests). The
+behaviours below are the result; they are enforced by those tests:
+
+- **Module ids are validated.** `module.prop` ids and `step.module_identifier` are
+  checked against `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` before they reach any root
+  shell command, so an archive cannot inject a second command through its id.
+- **A module that is not installed cannot be enabled.** `enable_module` /
+  `disable_module` probe `/data/adb/modules/<id>` first and fail with `absent`
+  rather than reporting success for `rm -f` on a missing path.
+- **`install_module` needs a verifiable id.** If the archive declares no id, the
+  step derives it from the stored ZIP; if it still cannot, the step fails as
+  unverifiable instead of trusting `magisk --install-module`'s exit status.
+- **`reboot` proves the reboot.** The `adb reboot` exit status must be zero and the
+  device's `boot_id` must change before the step reports success.
+- **`verify` compares expectations both ways.** An explicit `false` is enforced, and
+  unknown or non-boolean keys fail the step instead of being ignored.
+- **`remove_lsposed` distinguishes "no" from "unknown".** A failed presence probe
+  returns an error, not a successful no-op.
+- **`continue_on_error` no longer hides failures.** A target with any failed step is
+  not ok, so the run ends `partial`/`failed` rather than `succeeded`.
+- **A cancelled run is not executed.** `execute_run` refuses any run that is not
+  `queued`, so cancelling before the worker starts is honoured.
+- **`install_lsposed` probes the real API level** (`ro.build.version.sdk`) when the
+  resolver does not supply one, so the API 27 guard actually fires.
+- **`PUT /profiles/{id}` returns 404** for an unknown id instead of creating it, and
+  renaming to an existing name returns 409.
+- **Auto-start is once per boot.** The profile is queued from `wait-boot` only (the
+  `start` call returns before the device is booted), a duplicate is skipped while a
+  run for that instance and profile is queued/running, `dry_run` starts queue
+  nothing, and deleting a profile clears its bindings.
+- **Provenance is redacted.** `import_url` strips userinfo and query values before
+  storing `source_url`.
+
 ### Lifecycle automation
 
 An AVD can be bound to a profile that runs automatically when it starts:

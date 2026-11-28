@@ -298,6 +298,12 @@ class InstrumentationRepository:
             return _profile_from_row(row) if row is not None else None
 
     def save_profile(self, profile: InstrumentationProfile) -> InstrumentationProfile:
+        clash = self.get_profile_by_name(profile.name)
+        if clash is not None and clash.id != profile.id:
+            raise ConflictError(
+                f"a profile named {profile.name!r} already exists",
+                hint=f"choose another name or edit {clash.id}",
+            )
         with self._db.transaction() as conn:
             conn.execute(_PROFILE_UPSERT, _profile_params(profile))
         return profile

@@ -211,6 +211,8 @@ not redistributed by this project.
 ## Publishing
 
 See [PUBLISHING.md](PUBLISHING.md) for the GitHub prerequisites, commands, release-asset
-layout and pre-publish checklist. Release artifacts are produced on demand with
-`python scripts/build_release.py` (wheel, optional sdist and the portable bundle) and
-attached to a GitHub release; this repository does not check in a `dist/` directory.
+layout and pre-publish checklist. Two builders exist and they do different things:
+`python scripts/build_release.py` produces the wheel (and optional sdist) with the GUI
+baked in, while `avdfleet bundle --offline -o <dir>` produces the portable folder; see
+[docs/portable.md](docs/portable.md). Artifacts are attached to a GitHub release; this
+repository does not check in a `dist/` directory.
