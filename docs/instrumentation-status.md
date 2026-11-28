@@ -93,12 +93,13 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 
 | Check | Result |
 | --- | --- |
-| `pytest tests/unit tests/api tests/cli tests/contract` | **1196 passed, 3 skipped** (201 s) |
+| `pytest tests/unit tests/api tests/cli tests/contract tests/qa` | **1212 passed, 3 skipped** (191 s) |
+| `pytest tests/integration tests/portable` | **220 passed** (21 s) |
 | `ruff check src tests bootstrap` | clean |
 | `mypy` | clean (195 files) |
 | `tsc --noEmit` (ui) | clean |
 | `vitest run` (ui) | **82 passed** (12 files) |
-| `scripts/check_docs_links.py` | 253 links in 31 files, all resolve |
+| `scripts/check_docs_links.py` | 255 links in 31 files, all resolve |
 | emulator e2e (`tests/e2e`) | not run in this pass; it boots real AVDs and was skipped to avoid colliding with the live verification |
 
 ## Resume instructions
@@ -159,3 +160,17 @@ Defects observed while verifying (not fixed here; `src/**` untouched by this pas
   runs. Running `adb root` first makes the same call report `magisk`. Consider
   probing through `root_shell(..., magisk=True)` (which has the adbd-root
   fallback) instead of a bare `su -c id`.
+
+## Host note (doctor adb-transport check)
+
+`tests/unit/test_doctor.py::test_all_green_with_complete_fake_toolchain` fails when the
+long-lived adb server was started without `ADB_LOCAL_TRANSPORT_MAX_PORT`; the check
+inspects the running server's environment, so it is host state, not a code defect.
+Restarting the server with the limit makes it pass:
+
+```powershell
+$env:ADB_LOCAL_TRANSPORT_MAX_PORT = "5681"; adb kill-server; adb start-server
+```
+
+AVD Fleet sets this for every adb it starts; only a server started by something else
+(or by an older build) trips the check.
