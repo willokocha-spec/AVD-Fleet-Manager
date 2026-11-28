@@ -19,7 +19,11 @@ Lifecycle and guarantees:
   (including one that observes an already-booted instance) invokes every
   registered boot-completed hook; hook failures are logged and swallowed.
 * ``stop`` prefers the emulator console's graceful ``kill``, falls back to
-  ``terminate`` then ``kill``, always releases ports and stops the proxy bridge.
+  ``terminate`` then ``kill``, waits for the whole emulator process tree (the
+  Windows launcher and its ``qemu-system-*`` child) to disappear, and only then
+  reports ``stopped``.  A pid recorded in durable state is identity-checked
+  against the AVD name / start time before it is trusted or signalled, so a
+  recycled pid can never be mistaken for a live instance.
 * ``supervisor`` notices external exits in the background and marks the instance
   ``error`` (or ``stopped`` when the stop was requested) and optionally restarts.
 * snapshots go through :class:`SnapshotService` (console first, ``adb emu``
@@ -36,11 +40,13 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import psutil
 
 from avdfleet.core.childenv import child_environment, sanitize_child_environment
 from avdfleet.core.config import Config
@@ -138,6 +144,103 @@ def _pid_alive(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+# A recorded process may be an ``emulator.exe`` launcher whose real worker is a
+# ``qemu-system-*`` child.  Both must be gone before an instance is "stopped".
+_IDENTITY_TIME_TOLERANCE_S = 10.0
+
+
+@dataclass
+class _TrackedProcess:
+    """One OS process captured for identity-checked termination."""
+
+    process: Any
+    pid: int
+    create_time: float
+
+
+def _epoch(value: datetime | None) -> float | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    try:
+        return value.timestamp()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _cmdline_mentions_avd(cmdline: Sequence[str] | None, name: str) -> bool:
+    """True when *cmdline* names this AVD (``-avd <name>`` or ``<name>.avd``)."""
+    if not cmdline:
+        return False
+    wanted = name.casefold()
+    avd_path = f"{wanted}.avd"
+    for index, token in enumerate(cmdline):
+        text = str(token)
+        folded = text.casefold()
+        if (
+            text == "-avd"
+            and index + 1 < len(cmdline)
+            and str(cmdline[index + 1]).casefold() == wanted
+        ):
+            return True
+        if folded == f"@{wanted}" or avd_path in folded:
+            return True
+    return False
+
+
+def _track_process(process: Any) -> _TrackedProcess | None:
+    try:
+        return _TrackedProcess(
+            process=process,
+            pid=int(process.pid),
+            create_time=float(process.create_time()),
+        )
+    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError, TypeError, ValueError):
+        return None
+
+
+def _tracked_alive(ref: _TrackedProcess) -> bool:
+    """Liveness for a captured process that also detects pid reuse."""
+    try:
+        if not ref.process.is_running():
+            return False
+        if ref.process.status() == psutil.STATUS_ZOMBIE:
+            return False
+        return abs(float(ref.process.create_time()) - ref.create_time) <= 1.0
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.AccessDenied, OSError):
+        # Cannot inspect it: do not claim (or report) that it is gone.
+        return True
+
+
+def _pid_matches_instance(
+    pid: int | None, name: str, started_at: datetime | None
+) -> bool | None:
+    """Check a recorded pid's identity: True match, False mismatch, None unknown.
+
+    A recycled pid must never be treated as the instance.  The AVD name in the
+    command line is the strongest signal (both ``emulator.exe`` and the
+    ``qemu-system-*`` child carry ``-avd <name>``); the recorded start time is
+    the fallback when the command line is unavailable.
+    """
+    if pid is None or int(pid) <= 0:
+        return None
+    try:
+        process = psutil.Process(int(pid))
+        cmdline = process.cmdline()
+        create_time = float(process.create_time())
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return None
+    if _cmdline_mentions_avd(cmdline, name):
+        return True
+    expected = _epoch(started_at)
+    if expected is None:
+        return None
+    return abs(create_time - expected) <= _IDENTITY_TIME_TOLERANCE_S
 
 
 def _coerce_event_sink(events: Any) -> EventSink:
@@ -727,7 +830,9 @@ class RuntimeManagerService:
         record.adb_serial = serial
         device = devices.get(serial)
         if device is None:
-            if not record.boot_completed and record.state is InstanceState.RUNNING or record.state not in _ACTIVE_STATES:
+            # A missing device only downgrades an unbooted RUNNING instance;
+            # STOPPING/ERROR records must retain the state they were given.
+            if record.state is InstanceState.RUNNING and not record.boot_completed:
                 record.state = InstanceState.STARTING
             return
         state = str(getattr(device, "state", ""))
@@ -974,9 +1079,15 @@ class RuntimeManagerService:
                 and persisted.state.active
                 and _pid_alive(persisted.pid)
             ):
-                raise ConflictError(
-                    f"instance {candidate!r} is already running (pid {persisted.pid})",
-                    hint="The process was started outside this daemon; stop it first.",
+                if _pid_matches_instance(persisted.pid, candidate, persisted.started_at) is not False:
+                    raise ConflictError(
+                        f"instance {candidate!r} is already running (pid {persisted.pid})",
+                        hint="The process was started outside this daemon; stop it first.",
+                    )
+                logger.warning(
+                    "instance %s: recorded pid %s belongs to another process; ignoring it",
+                    candidate,
+                    persisted.pid,
                 )
             template = self._template_for(base_info)
             image_id = (
@@ -1265,6 +1376,146 @@ class RuntimeManagerService:
         )
 
     # -- stop helpers ---------------------------------------------------
+    def _collect_emulator_processes(
+        self, name: str, pid: int | None, started_at: datetime | None
+    ) -> list[_TrackedProcess]:
+        """Capture launcher descendants plus any worker whose argv names this AVD.
+
+        On Windows the recorded process is the ``emulator.exe`` launcher; the
+        ``qemu-system-*`` worker is its child.  Killing only the launcher leaves
+        qemu running, so both must be tracked before any signal is sent.
+        """
+        tracked: dict[int, _TrackedProcess] = {}
+
+        def add(process: Any) -> None:
+            ref = _track_process(process)
+            if ref is None or ref.pid == os.getpid():
+                return
+            if pid is not None and ref.pid == int(pid):
+                return
+            tracked[ref.pid] = ref
+
+        if pid is not None:
+            try:
+                root = psutil.Process(int(pid))
+                for child in root.children(recursive=True):
+                    add(child)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                pass
+        started_epoch = _epoch(started_at)
+        try:
+            processes = psutil.process_iter(["pid", "cmdline", "create_time"])
+        except OSError:
+            processes = []
+        for process in processes:
+            try:
+                info = process.info
+                candidate_pid = int(info.get("pid") or 0)
+                if candidate_pid == os.getpid() or (pid is not None and candidate_pid == int(pid)):
+                    continue
+                if not _cmdline_mentions_avd(info.get("cmdline"), name):
+                    continue
+                create_time = info.get("create_time")
+                if create_time is None:
+                    continue
+                if (
+                    started_epoch is not None
+                    and float(create_time) + _IDENTITY_TIME_TOLERANCE_S < started_epoch
+                ):
+                    continue
+                add(process)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                continue
+        return list(tracked.values())
+
+    def _wait_tracked(
+        self, refs: Sequence[_TrackedProcess], timeout_s: float
+    ) -> list[_TrackedProcess]:
+        deadline = self._clock() + max(0.0, float(timeout_s))
+        pending = list(refs)
+        while True:
+            pending = [ref for ref in pending if _tracked_alive(ref)]
+            if not pending:
+                return []
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return pending
+            self._sleep(min(0.1, max(0.01, remaining)))
+
+    @staticmethod
+    def _signal_tracked(refs: Sequence[_TrackedProcess], *, kill: bool) -> None:
+        for ref in refs:
+            if not _tracked_alive(ref):
+                continue
+            try:
+                if kill:
+                    ref.process.kill()
+                else:
+                    ref.process.terminate()
+            except psutil.NoSuchProcess:
+                continue
+            except (psutil.AccessDenied, OSError) as exc:
+                action = "kill" if kill else "terminate"
+                logger.warning("could not %s emulator process %s: %s", action, ref.pid, exc)
+
+    def _cleanup_emulator_processes(
+        self,
+        name: str,
+        pid: int | None,
+        started_at: datetime | None,
+        seeded: Sequence[_TrackedProcess],
+        timeout_s: float,
+    ) -> list[_TrackedProcess]:
+        """Terminate, then kill, surviving emulator workers; return any survivors."""
+        merged: dict[int, _TrackedProcess] = {ref.pid: ref for ref in seeded}
+        for ref in self._collect_emulator_processes(name, pid, started_at):
+            merged.setdefault(ref.pid, ref)
+        pending = [ref for ref in merged.values() if _tracked_alive(ref)]
+        if not pending:
+            return []
+        logger.warning(
+            "%s: %d emulator child process(es) survived; terminating",
+            name,
+            len(pending),
+        )
+        self._signal_tracked(pending, kill=False)
+        pending = self._wait_tracked(pending, min(2.0, max(1.0, float(timeout_s))))
+        if pending:
+            self._signal_tracked(pending, kill=True)
+            pending = self._wait_tracked(pending, 5.0)
+        # A worker may have been reparented or started late; rescan by AVD name.
+        for ref in self._collect_emulator_processes(name, pid, started_at):
+            if ref.pid in merged:
+                continue
+            merged[ref.pid] = ref
+            if _tracked_alive(ref):
+                logger.warning("%s: killing late emulator process %s", name, ref.pid)
+                self._signal_tracked([ref], kill=True)
+                self._wait_tracked([ref], 2.0)
+        return [ref for ref in merged.values() if _tracked_alive(ref)]
+
+    def _mark_stop_failed(
+        self,
+        record: RunningInstance,
+        survivors: Sequence[_TrackedProcess],
+        *,
+        root_alive: bool,
+    ) -> None:
+        target = f"process {record.pid}" if record.pid else "the emulator process"
+        message = (
+            f"could not stop instance {record.name!r}: {target} is still alive"
+            if root_alive
+            else f"could not stop instance {record.name!r}: emulator worker process(es) still alive"
+        )
+        if survivors:
+            message += f" (pid(s): {', '.join(str(ref.pid) for ref in survivors)})"
+        with self._lock:
+            record.state = InstanceState.ERROR
+            record.error = message
+            self._persist_record(record)
+        self._emit_state(record.name, InstanceState.ERROR, pid=record.pid, error=message)
+        logger.error(message)
+
     def _console_kill(self, record: RunningInstance) -> None:
         console: EmulatorConsoleLike | None = None
         try:
@@ -1305,41 +1556,8 @@ class RuntimeManagerService:
         except Exception:  # noqa: BLE001
             pass
 
-    def _stop_external(
-        self,
-        name: str,
-        info: AvdInfo,
-        *,
-        timeout_s: float,
-        force: bool,
-    ) -> AvdInfo:
-        """Stop an emulator discovered from persisted state but not owned by us."""
-        serial = info.adb_serial or (boot_serial(info.ports) if info.ports else None)
-        if info.ports is not None and not force:
-            record = RunningInstance(
-                name=name,
-                process=_NullProcess(info.pid or 0),
-                spec=None,  # type: ignore[arg-type]
-                ports=info.ports,
-                state=InstanceState.RUNNING,
-                started_at=info.started_at or self._now(),
-                started_monotonic=self._clock(),
-            )
-            self._console_kill(record)
-        if info.pid is not None and _pid_alive(info.pid):
-            if serial:
-                try:
-                    self._adb.emu(serial, "kill", timeout_s=10.0)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("adb emu kill failed for external %s: %s", name, exc)
-            deadline = self._clock() + max(1.0, timeout_s)
-            while self._clock() < deadline and _pid_alive(info.pid):
-                self._sleep(0.1)
-            if _pid_alive(info.pid):
-                raise InstanceError(
-                    f"could not stop externally-started instance {name!r} (pid {info.pid})",
-                    hint="Stop the emulator manually; it was not launched by this daemon.",
-                )
+    def _finish_external_stop(self, name: str, info: AvdInfo) -> AvdInfo:
+        """Persist and announce a verified external stop."""
         self._release_ports(name)
         self._stop_bridge(name)
         stopped = self._persist_state(
@@ -1355,6 +1573,90 @@ class RuntimeManagerService:
         )
         self._emit_state(name, InstanceState.STOPPED)
         return stopped
+
+    def _stop_external(
+        self,
+        name: str,
+        info: AvdInfo,
+        *,
+        timeout_s: float,
+        force: bool,
+    ) -> AvdInfo:
+        """Stop an emulator discovered from persisted state but not owned by us."""
+        if _pid_matches_instance(info.pid, name, info.started_at) is not True:
+            # The pid is recycled or cannot be verified: never signal it and
+            # never report the recorded process as our emulator.
+            logger.warning(
+                "instance %s: recorded pid %s does not identify as this AVD; "
+                "clearing stale runtime state without touching it",
+                name,
+                info.pid,
+            )
+            self._release_ports(name)
+            self._stop_bridge(name)
+            return self._persist_state(
+                name,
+                state=InstanceState.STOPPED,
+                ports=info.ports,
+                error="",
+                boot_completed=False,
+                template_id=info.template_id,
+                image_id=info.image_id,
+                device_id=info.device_id,
+                proxy_id=info.proxy_id,
+            )
+        serial = info.adb_serial or (boot_serial(info.ports) if info.ports else None)
+        tracked = self._collect_emulator_processes(name, info.pid, info.started_at)
+        root_ref: _TrackedProcess | None = None
+        if info.pid is not None and _pid_alive(info.pid):
+            try:
+                root_ref = _track_process(psutil.Process(int(info.pid)))
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                root_ref = None
+            if info.ports is not None and not force:
+                record = RunningInstance(
+                    name=name,
+                    process=_NullProcess(info.pid or 0),
+                    spec=None,  # type: ignore[arg-type]
+                    ports=info.ports,
+                    state=InstanceState.RUNNING,
+                    started_at=info.started_at or self._now(),
+                    started_monotonic=self._clock(),
+                )
+                self._console_kill(record)
+            if serial:
+                try:
+                    self._adb.emu(serial, "kill", timeout_s=10.0)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("adb emu kill failed for external %s: %s", name, exc)
+            wait_refs = ([root_ref] if root_ref is not None else []) + tracked
+            pending = self._wait_tracked(wait_refs, max(1.0, float(timeout_s)))
+            if pending:
+                logger.warning(
+                    "externally-started instance %s did not exit gracefully; terminating",
+                    name,
+                )
+                self._signal_tracked(pending, kill=False)
+                pending = self._wait_tracked(pending, min(2.0, max(1.0, float(timeout_s))))
+            if pending:
+                self._signal_tracked(pending, kill=True)
+                pending = self._wait_tracked(pending, 5.0)
+            if pending:
+                raise InstanceError(
+                    f"could not stop externally-started instance {name!r} (pid {info.pid}); "
+                    f"process(es) {', '.join(str(ref.pid) for ref in pending)} are still alive",
+                    hint="Stop the emulator manually; it was not launched by this daemon.",
+                )
+        survivors = self._cleanup_emulator_processes(
+            name, info.pid, info.started_at, tracked, timeout_s
+        )
+        if survivors:
+            raise InstanceError(
+                f"could not stop externally-started instance {name!r}; emulator worker "
+                f"process(es) {', '.join(str(ref.pid) for ref in survivors)} are still alive",
+                hint="Stop the emulator manually; it was not launched by this daemon.",
+            )
+        return self._finish_external_stop(name, info)
 
     def stop(
         self,
@@ -1372,14 +1674,47 @@ class RuntimeManagerService:
             record = self._records.get(candidate)
             if record is None:
                 persisted = self._state_store.load(candidate) or base_info
+                stale_pid: int | None = None
                 if (
                     persisted.state.active
                     and persisted.pid is not None
                     and _pid_alive(persisted.pid)
                 ):
-                    return self._stop_external(
-                        candidate, persisted, timeout_s=timeout, force=force
+                    if _pid_matches_instance(
+                        persisted.pid, candidate, persisted.started_at
+                    ) is True:
+                        return self._stop_external(
+                            candidate, persisted, timeout_s=timeout, force=force
+                        )
+                    stale_pid = persisted.pid
+                # Even without a live recorded pid, an emulator (or its qemu
+                # worker) whose argv names this AVD must not be reported stopped.
+                matches = self._collect_emulator_processes(
+                    candidate, None, persisted.started_at
+                )
+                if matches:
+                    chosen = min(matches, key=lambda ref: ref.create_time)
+                    logger.warning(
+                        "instance %s: %s; stopping AVD process %s",
+                        candidate,
+                        f"recorded pid {stale_pid} is stale" if stale_pid else "no live runtime state",
+                        chosen.pid,
                     )
+                    return self._stop_external(
+                        candidate,
+                        persisted.model_copy(update={"pid": chosen.pid}),
+                        timeout_s=timeout,
+                        force=force,
+                    )
+                if stale_pid is not None:
+                    logger.warning(
+                        "instance %s: recorded pid %s does not identify as this AVD; "
+                        "clearing stale runtime state",
+                        candidate,
+                        stale_pid,
+                    )
+                    self._release_ports(candidate)
+                    self._stop_bridge(candidate)
                 return self._persist_state(
                     candidate,
                     state=InstanceState.STOPPED,
@@ -1391,6 +1726,17 @@ class RuntimeManagerService:
                     proxy_id=persisted.proxy_id,
                 )
             if self._poll(record) is not None:
+                # The launcher already exited, but a qemu worker may have survived.
+                survivors = self._cleanup_emulator_processes(
+                    candidate, record.pid, record.started_at, [], timeout
+                )
+                if survivors:
+                    self._mark_stop_failed(record, survivors, root_alive=False)
+                    raise InstanceError(
+                        f"could not stop instance {candidate!r}; emulator worker process(es) "
+                        f"{', '.join(str(ref.pid) for ref in survivors)} are still alive",
+                        hint="Inspect the emulator log and stop the qemu process manually.",
+                    )
                 info = self._handle_process_exit(
                     candidate, record.last_exit_code, expected=True
                 )
@@ -1401,6 +1747,8 @@ class RuntimeManagerService:
             record.state = InstanceState.STOPPING
             self._persist_record(record)
         self._emit_state(candidate, InstanceState.STOPPING, pid=record.pid)
+        # Capture the launcher tree before any signal so qemu cannot be orphaned.
+        tracked = self._collect_emulator_processes(candidate, record.pid, record.started_at)
         if force:
             self._terminate(record)
             self._wait_exit(record, min(5.0, max(1.0, timeout)))
@@ -1415,6 +1763,21 @@ class RuntimeManagerService:
             logger.warning("emulator %s ignored SIGTERM; killing", candidate)
             self._kill(record)
             self._wait_exit(record, 5.0)
+        survivors = self._cleanup_emulator_processes(
+            candidate, record.pid, record.started_at, tracked, timeout
+        )
+        root_alive = self._poll(record) is None
+        if root_alive or survivors:
+            self._mark_stop_failed(record, survivors, root_alive=root_alive)
+            details = (
+                f"process {record.pid} is still alive"
+                if root_alive
+                else f"emulator worker process(es) {', '.join(str(ref.pid) for ref in survivors)} are still alive"
+            )
+            raise InstanceError(
+                f"could not stop instance {candidate!r}: {details}",
+                hint="Inspect the emulator log and stop the process manually.",
+            )
         exit_code = record.last_exit_code
         if exit_code is None:
             exit_code = self._poll(record)
@@ -1460,7 +1823,16 @@ class RuntimeManagerService:
             persisted = self._state_store.load(candidate)
             if persisted is not None and persisted.state.active:
                 if persisted.pid is not None and _pid_alive(persisted.pid):
-                    return persisted
+                    if _pid_matches_instance(
+                        persisted.pid, candidate, persisted.started_at
+                    ) is not False:
+                        return persisted
+                    logger.warning(
+                        "instance %s: recorded pid %s belongs to another process; "
+                        "reporting it as stopped",
+                        candidate,
+                        persisted.pid,
+                    )
                 stopped = self._persist_state(
                     candidate,
                     state=InstanceState.STOPPED,
@@ -1496,18 +1868,27 @@ class RuntimeManagerService:
                     if not persisted.state.active:
                         continue
                     if persisted.pid is not None and _pid_alive(persisted.pid):
-                        active[name] = persisted
-                    else:
-                        self._persist_state(
+                        if _pid_matches_instance(
+                            persisted.pid, name, persisted.started_at
+                        ) is not False:
+                            active[name] = persisted
+                            continue
+                        logger.warning(
+                            "instance %s: recorded pid %s belongs to another process; "
+                            "clearing stale runtime state",
                             name,
-                            state=InstanceState.STOPPED,
-                            ports=persisted.ports,
-                            error="",
-                            template_id=persisted.template_id,
-                            image_id=persisted.image_id,
-                            device_id=persisted.device_id,
-                            proxy_id=persisted.proxy_id,
+                            persisted.pid,
                         )
+                    self._persist_state(
+                        name,
+                        state=InstanceState.STOPPED,
+                        ports=persisted.ports,
+                        error="",
+                        template_id=persisted.template_id,
+                        image_id=persisted.image_id,
+                        device_id=persisted.device_id,
+                        proxy_id=persisted.proxy_id,
+                    )
         return sorted(active.values(), key=lambda item: item.name)
 
     def reconcile(self) -> list[AvdInfo]:

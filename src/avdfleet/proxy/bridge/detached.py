@@ -17,6 +17,12 @@ processes and ``instances stop`` really tears the listener down.
 
 Design notes
 ------------
+* **Port ownership.** The worker binds port 0 and publishes the real port in
+  its state file; the parent never pre-allocates one.  A port that looks free in
+  this process is not reserved for a child, and (on Windows) a listener bound
+  with ``SO_REUSEADDR`` can be shadowed by a later binder on the same port.  The
+  worker therefore owns both the allocation and the bind, and the state file is
+  the only authority for the port.
 * **Secrets.** The worker resolves the upstream password from the vault itself;
   argv carries only the proxy *id*.  The loopback listener token is generated
   inside the worker and published (0600) in the state file, so it never appears
@@ -120,6 +126,8 @@ class DetachedBridgeManager:
     ) -> None:
         self._config = config or Config()
         self._paths = paths or self._config.resolved_paths()
+        # Only ``enable_socks`` is read here.  ``port_start`` is deliberately not
+        # forwarded: the worker binds its own (kernel-assigned) ports.
         self._options = options or BridgeOptions(port_start=self._config.bridge_port_start)
         self._python = python or sys.executable
         self._ready_timeout_s = float(ready_timeout_s)
@@ -276,7 +284,20 @@ class DetachedBridgeManager:
         socks_port: int | None = None,
         local_auth_token: str | None = None,
     ) -> BridgeConfig:
+        """Start the instance's worker, or reuse the live one.
+
+        Returns the ports the worker bound and published.  ``listen_port`` and
+        ``socks_port`` are accepted for interface parity with the in-process
+        manager but never forwarded: a port chosen here cannot be reserved for a
+        child process, so only the worker (which binds port 0) may decide.
+        """
         instance = _validate_instance(instance)
+        if listen_port is not None or socks_port is not None:
+            _LOGGER.debug(
+                "detached bridge ignores caller-selected ports for instance=%s; "
+                "the worker binds and publishes its own",
+                instance,
+            )
         proxy_id = getattr(proxy, "id", None)
         existing = self._read(instance)
         if existing is not None:

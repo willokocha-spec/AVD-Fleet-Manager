@@ -9,7 +9,9 @@ loopback-only TCP proxy owned by AVDFleet:
 
 * one **listener pair per instance** - an HTTP proxy (``CONNECT`` tunnels plus
   absolute-URI forwarding) and a SOCKS5 listener - bound to ``127.0.0.1`` on
-  auto-allocated ports starting at ``Config.bridge_port_start``;
+  auto-allocated ports starting at ``Config.bridge_port_start``.  A caller that
+  cannot share the process's port table (the detached worker) instead asks the
+  kernel for a free port and publishes it (``ephemeral_ports``);
 * exactly **one upstream per instance** - HTTP/HTTPS forward proxy with Basic
   auth, SOCKS5 proxy with username/password auth, or direct (tests/failover);
 * upstream credentials live only in the in-memory :class:`Upstream` object and
@@ -187,7 +189,16 @@ class AsyncBridgeManager:
         *,
         options: BridgeOptions | None = None,
         port_allocator: PortAllocator | None = None,
+        ephemeral_ports: bool = False,
     ) -> None:
+        """Create the engine.
+
+        ``ephemeral_ports`` binds every new listener on port 0 and reports the
+        kernel-assigned port instead of scanning ``port_start..port_end``.  The
+        detached worker uses it because a parent process cannot reserve a port
+        for a child it has not spawned yet: only the process that actually binds
+        the socket can know the port is truly free across processes.
+        """
         opts = options or BridgeOptions()
         if opts.port_start is None:
             if port_allocator is not None:
@@ -200,6 +211,7 @@ class AsyncBridgeManager:
         self._options = opts
         self._config = config
         self._port_allocator = port_allocator
+        self._ephemeral_ports = ephemeral_ports
         self._instances: dict[str, _InstanceState] = {}
         self._used_ports: set[int] = set()
         self._lock = asyncio.Lock()
@@ -466,16 +478,20 @@ class AsyncBridgeManager:
                 ) from exc
             self._reserve_port(bound)
             return bound
-        for candidate in range(self._options.effective_port_start, self._options.effective_port_end + 1):
-            if candidate in self._used_ports:
-                continue
-            try:
-                bound = await server.start(candidate)
-            except OSError:
-                continue
-            self._reserve_port(bound)
-            return bound
-        # Exhausted the configured range: fall back to an ephemeral loopback port.
+        if not self._ephemeral_ports:
+            for candidate in range(self._options.effective_port_start, self._options.effective_port_end + 1):
+                if candidate in self._used_ports:
+                    continue
+                try:
+                    bound = await server.start(candidate)
+                except OSError:
+                    continue
+                self._reserve_port(bound)
+                return bound
+        # Either the detached worker asked the kernel for a port (the only
+        # allocation that cannot collide across processes) or the configured
+        # range is exhausted.  Binding port 0 is atomic in the OS, so a second
+        # process is never handed a port a live listener already owns.
         try:
             bound = await server.start(0)
         except OSError as exc:  # pragma: no cover - host socket exhaustion

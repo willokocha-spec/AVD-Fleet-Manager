@@ -21,12 +21,18 @@ Contract with the manager
 The worker owns its state file ``<data_dir>/bridge/<instance>.json``::
 
     {"pid": 1234, "instance": "avd-01", "proxy_id": "px_...",
-     "listen_host": "127.0.0.1", "listen_port": 7800, "socks_port": null,
+     "listen_host": "127.0.0.1", "listen_port": 54321, "socks_port": 54322,
      "mode": "http", "upstream": "http://gate.example.com:8080",
      "token": "<loopback listener Basic-auth token>", "created_at": 1.0}
 
 * written atomically **after** the listener is bound, so its presence means the
   bridge is usable;
+* the ports are **kernel-assigned** (``bind`` port 0): no parent process can
+  reserve a port for a child it has not spawned yet, and on Windows a listener
+  bound with ``SO_REUSEADDR`` can be shadowed by a later binder on the same
+  port.  Binding port 0 makes the OS allocate atomically, so two workers can
+  never be handed the same port; the parent reads the real values back from
+  this file.  Neither port is ever chosen by the CLI/daemon process;
 * the loopback listener token is generated *here* and only ever travels through
   this file: never argv (``ps``) and never the emulator log;
 * deleting the state file, writing ``<instance>.json.stop`` next to it, or
@@ -209,7 +215,12 @@ async def _run(args: _WorkerArgs, config: Config, paths: Paths) -> int:
         proxy = _resolve_proxy(config, paths, args.proxy_id)
 
     token = secrets.token_urlsafe(32)
-    manager = AsyncBridgeManager(config)
+    # This process owns both the allocation and the bind.  A port picked by the
+    # CLI/daemon parent would be free from every other process's point of view
+    # until this worker binds it, and on Windows the SO_REUSEADDR the listeners
+    # set would even let a second binder take the same port.  Port 0 delegates
+    # the decision to the kernel; the state file below publishes the result.
+    manager = AsyncBridgeManager(config, ephemeral_ports=True)
     await manager.start()
     stopping = asyncio.Event()
 

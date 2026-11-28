@@ -194,21 +194,26 @@ AVD Fleet sets this for every adb it starts; only a server started by something 
 
 ## Open defects found by the item-10 proof
 
-These were found while proving guest isolation and are **not yet fixed**; each is
-reproducible from the evidence in `docs/acceptance.md`.
+Found while proving guest isolation. Two are fixed; one remains open.
 
-1. **HIGH — detached bridge port collision on Windows.** Starting two instances with
+1. **FIXED — HIGH — detached bridge port collision on Windows.** Starting two instances with
    detached bridges published both workers on `127.0.0.1:7800` (the second binder wins
    because of `SO_REUSEADDR`), so the first instance's traffic reaches the second
    instance's listener. It fails closed (407), but concurrent bridged instances are
    unusable and the per-instance port assumption is wrong. Suggested fix: have the
    worker bind port 0, write the chosen port into its state file, and have the manager
-   wait for that handshake instead of pre-allocating a port in the parent process.
-2. **MEDIUM — bridge token is plaintext in `<data>/bridge/<instance>-<hash>.json`.**
+   The worker now binds an ephemeral port (kernel-assigned) and publishes the real
+   port in its state file; two workers were observed on 59958 and 59967, and the
+   pre-fix code fails the new two-process test. In-process/daemon behaviour is
+   unchanged.
+2. **OPEN — MEDIUM — bridge token is plaintext in `<data>/bridge/<instance>-<hash>.json`.**
    Any process running as the same user can read it and use that listener. Guest
    isolation is unaffected. Suggested fix: rely on the `0600` file mode already
    available to the state file, or store a hash of the token and compare hashes.
-3. **LOW/unconfirmed — `POST /instances/{name}/stop` reported `stopped` while the qemu
+3. **FIXED — HIGH — `POST /instances/{name}/stop` reported `stopped` while the qemu
    PIDs were still alive.** Seen once under a separate daemon with a temp data dir;
-   may be an artefact of the harness rather than the product. Needs a focused
-   reproduction before it is treated as a defect.
+   Reproduced deterministically: the stop path marked the record stopped without
+   confirming the launcher had exited, and it only ever polled the launcher, never
+   the qemu child. A force stop now waits for the whole process tree (terminate ->
+   kill -> rescan), refuses to claim success while anything survives (`ERROR` +
+   `InstanceError`), and never signals an unverified or recycled pid.
