@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
@@ -19,6 +19,7 @@ from avdfleet.core.errors import ValidationError
 from avdfleet.core.models import DoctorReport, HostInfo, OperationResult
 from avdfleet.core.paths import Paths
 
+from ..auth import websocket_tickets
 from ..container import ContainerAdapter, ServiceUnavailable
 from ..deps import ConfigDep, ContainerDep, PathsDep, require_auth
 from ..errors import ErrorResponse
@@ -50,6 +51,13 @@ class AuthCheck(BaseModel):
 
     ok: bool = True
     expires_at: str | None = None
+
+
+class WsTicket(BaseModel):
+    """``#/components/schemas/WsTicket``: one single-use WebSocket ticket."""
+
+    ticket: str
+    expires_in: int = 0
 
 
 class AcceleratorInfoView(BaseModel):
@@ -365,6 +373,27 @@ def check_auth() -> AuthCheck:
     return AuthCheck(ok=True, expires_at=None)
 
 
+@router.post(
+    "/auth/ws-ticket",
+    operation_id="issueWsTicket",
+    summary="Issue a single-use ticket for the WebSocket handshake",
+    response_model=WsTicket,
+    responses={401: {"model": ErrorResponse}},
+)
+def issue_ws_ticket(request: Request, response: Response) -> WsTicket:
+    """Mint a short-lived, single-use ticket for the WebSocket endpoints.
+
+    Browsers cannot set an ``Authorization`` header on a WebSocket handshake, so
+    the GUI fetches a ticket here (with the normal bearer authentication) and
+    passes it as ``?ticket=``.  The ticket is opaque, high-entropy, never derived
+    from the token, burned on first use and rejected once expired.  The response
+    is marked ``no-store`` so it is not cached by a proxy or the browser.
+    """
+    store = websocket_tickets(request.app.state)
+    response.headers["Cache-Control"] = "no-store"
+    return WsTicket(ticket=store.issue(), expires_in=int(store.ttl_s))
+
+
 @router.get(
     "/system",
     operation_id="getSystem",
@@ -495,6 +524,7 @@ __all__ = [
     "HealthResponse",
     "HostInfoView",
     "SystemInfoView",
+    "WsTicket",
     "collect_host",
     "config_view",
     "health_router",

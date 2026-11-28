@@ -165,7 +165,7 @@ def test_initialize_creates_schema_in_wal_mode(store: Store) -> None:
     assert health["foreign_keys"] is True
     assert int(health["busy_timeout_ms"]) > 0
     assert health["integrity"] == "ok"
-    assert health["tables"] == 14
+    assert health["tables"] == 15
     assert store.schema_version == SCHEMA_VERSION
     assert store.db_path == Path(store.db_path)
 
@@ -239,7 +239,7 @@ def test_migrations_upgrade_a_v1_database(tmp_path: Path) -> None:
         assert instance.settings.get("legacy") == "kept"
         assert instance.runs.list() == []
         assert instance.oobe.list() == []
-        assert [version for version, _, _ in instance.applied_migrations()] == [1, 2, 3]
+        assert [version for version, _, _ in instance.applied_migrations()] == [1, 2, 3, 4]
     finally:
         instance.close()
 

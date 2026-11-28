@@ -515,10 +515,15 @@ class BridgeManager:
         port_allocator: PortAllocator | None = None,
         call_timeout_s: float = 120.0,
         loop_thread_name: str = "avdfleet-bridge",
+        detached: Any | None = None,
     ) -> None:
         self._core = AsyncBridgeManager(config, options=options, port_allocator=port_allocator)
         self._call_timeout_s = call_timeout_s
         self._loop_thread_name = loop_thread_name
+        #: Optional out-of-process worker manager.  The daemon's own instances
+        #: stay in-process; this only lets it *see and stop* workers spawned by a
+        #: one-shot ``avdfleet instances start`` CLI process.
+        self._detached = detached
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._loop_lock = threading.Lock()
@@ -554,6 +559,11 @@ class BridgeManager:
     def stop_all(self) -> None:
         """Stop every instance listener but keep the manager usable."""
         self._submit(self._core.stop_all())
+        if self._detached is not None:
+            try:
+                self._detached.stop_all()
+            except Exception as exc:  # noqa: BLE001 - detached cleanup is best effort
+                _LOGGER.warning("detached bridge shutdown failed: %s", redact_text(str(exc)))
 
     def __enter__(self) -> BridgeManager:
         return self.start()
@@ -586,12 +596,50 @@ class BridgeManager:
 
     def stop(self, instance: str) -> None:
         self._submit(self._core.stop(instance))
+        # ``instances stop`` must also reach a worker started by a different
+        # CLI process; the in-process listener above remains the daemon default.
+        self.stop_detached(instance)
 
     def get(self, instance: str) -> BridgeConfig | None:
         return self._submit(self._core.get(instance))
 
     def list_active(self) -> list[BridgeConfig]:
         return self._submit(self._core.list_active())
+
+    # -- out-of-process (detached) workers -------------------------------
+    def list_detached(self) -> list[BridgeConfig]:
+        """List live detached workers published by ANY process.
+
+        The daemon normally owns its instances in-process; this capability only
+        surfaces bridges spawned by a one-shot ``avdfleet instances start`` CLI.
+        """
+        if self._detached is None:
+            return []
+        return list(self._detached.list_detached())
+
+    def stop_detached(self, instance: str) -> None:
+        """Stop an out-of-process worker for *instance* (no-op when absent)."""
+        if self._detached is None:
+            return
+        try:
+            self._detached.stop_detached(instance)
+        except Exception as exc:  # noqa: BLE001 - never break in-process stop
+            _LOGGER.warning(
+                "detached bridge stop failed for %s: %s",
+                instance,
+                redact_text(str(exc)),
+            )
+
+    def cleanup_detached(
+        self,
+        is_running: Any | None = None,
+        *,
+        min_age_s: float = 0.0,
+    ) -> list[str]:
+        """Clean state files of dead/stopped detached workers; returns their names."""
+        if self._detached is None:
+            return []
+        return list(self._detached.cleanup_detached(is_running=is_running, min_age_s=min_age_s))
 
     # -- extras ----------------------------------------------------------
     def http_port(self, instance: str) -> int | None:

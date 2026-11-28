@@ -27,6 +27,7 @@ import type {
   AppiumStatus,
   AuthCheck,
   AutoAssignRequest,
+  AutoProfileView,
   AvdInfo,
   BridgeConfig,
   BulkDeployRequest,
@@ -705,6 +706,15 @@ export const instrumentationApi = {
    * verified copy is already on the daemon. `available: false` means the daemon
    * has no acquisition store configured; nothing can be downloaded.
    */
+  getAutoProfile: (name: string) =>
+    request<AutoProfileView>(
+      `/instrumentation/instances/${encodeURIComponent(name)}/auto-profile`,
+    ),
+  setAutoProfile: (name: string, profileId: string) =>
+    request<AutoProfileView>(
+      `/instrumentation/instances/${encodeURIComponent(name)}/auto-profile`,
+      { method: "PUT", body: { profile_id: profileId } },
+    ),
   getToolchain: () => request<ToolchainView>("/instrumentation/toolchain"),
 
   /**

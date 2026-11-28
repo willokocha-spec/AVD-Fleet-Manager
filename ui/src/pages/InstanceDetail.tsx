@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import {
@@ -14,15 +14,17 @@ import {
   Input,
   Modal,
   PageHeader,
+  Select,
   Skeleton,
   Tabs,
   useToast,
   type TabItem,
 } from "@/lib/components";
 import { useAsync } from "@/lib/hooks";
-import { api } from "@/lib/api";
+import { api, instrumentationApi } from "@/lib/api";
 import type { PageMeta } from "@/lib/page-meta";
 import { formatDateTime } from "@/lib/utils";
+import type { AutoProfileView } from "@/lib/types";
 
 import {
   InstanceEventsPanel,
@@ -99,6 +101,89 @@ const LOADING_TABS: TabItem[] = [
     content: <Skeleton lines={4} />,
   },
 ];
+
+/**
+ * Bind (or clear) the instrumentation profile that runs automatically once this
+ * instance has booted. Every control calls the real endpoint; failures are shown
+ * instead of an optimistic success.
+ */
+function AutoProfileCard({ name }: { name: string }) {
+  const toast = useToast();
+  const profiles = useAsync(() => instrumentationApi.listProfiles(), []);
+  const binding = useAsync(() => instrumentationApi.getAutoProfile(name), [name]);
+  const [selected, setSelected] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    const current: AutoProfileView | null = binding.data;
+    setSelected(current?.profile_id ?? "");
+  }, [binding.data]);
+
+  const save = async (profileId: string) => {
+    setSaving(true);
+    setError("");
+    try {
+      const next = await instrumentationApi.setAutoProfile(name, profileId);
+      binding.setData(next);
+      setSelected(next.profile_id);
+      toast.success(
+        next.profile_id
+          ? `Auto-profile bound: ${next.profile_id}`
+          : "Auto-profile cleared",
+      );
+    } catch (cause) {
+      setError(describeError(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const options = (profiles.data?.profiles ?? []).map((profile) => ({
+    value: profile.id,
+    label: profile.name,
+  }));
+
+  return (
+    <Card
+      title="Root & instrumentation"
+      description="The profile applied automatically once this instance has booted. Runs at most once per boot."
+      icon="zap"
+    >
+      <div className="stack">
+        {error ? <InlineNotice tone="danger">{error}</InlineNotice> : null}
+        {profiles.error ? (
+          <InlineNotice tone="warning">{describeError(profiles.error)}</InlineNotice>
+        ) : null}
+        <Field label="Auto-profile" hint="Leave empty to run nothing automatically.">
+          <Select
+            value={selected}
+            options={[{ value: "", label: "None" }, ...options]}
+            onChange={(event) => setSelected(event.target.value)}
+            disabled={profiles.loading || binding.loading || saving}
+          />
+        </Field>
+        <div className="row">
+          <Button
+            variant="primary"
+            loading={saving}
+            disabled={saving || selected === (binding.data?.profile_id ?? "")}
+            onClick={() => void save(selected)}
+          >
+            Save
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={saving || !binding.data?.profile_id}
+            onClick={() => void save("")}
+          >
+            Clear
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
 
 function ScreenCardSkeleton() {
   return (
@@ -464,6 +549,8 @@ export default function InstanceDetailPage() {
                 autoRefreshMs={3_000}
               />
             </Card>
+
+            <AutoProfileCard name={name} />
 
             <Card title="Runtime" description="Live process, ports and boot state for this instance." icon="instance">
               <dl className="kv-list">

@@ -7,6 +7,10 @@ import pathlib
 
 import yaml
 
+from avdfleet.core.config import Config
+from avdfleet.core.logging import redact
+from avdfleet.core.ports import PortAllocator
+
 root = pathlib.Path(__file__).resolve().parents[1]
 for rel in [
     "contracts/openapi.yaml",
@@ -24,10 +28,6 @@ for rel in [
         print(rel, "OK", type(data).__name__, extra)
     except Exception as exc:  # noqa: BLE001
         print(rel, "FAIL", type(exc).__name__, exc)
-
-from avdfleet.core.config import Config
-from avdfleet.core.logging import redact
-from avdfleet.core.ports import PortAllocator
 
 samples = [
     "connecting http://alice:s3cret@127.0.0.1:8081 to guest",

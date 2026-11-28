@@ -28,7 +28,7 @@ __all__ = [
     "ensure_schema",
 ]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: Created before any migration runs.  ``version`` is the primary key so each
 #: migration is recorded at most once, even if two daemons race at startup.
@@ -301,10 +301,31 @@ _V3_STATEMENTS: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# v4 -- Lifecycle automation: the boot identity that already triggered an
+#        automatic instrumentation run.  The composite primary key is what makes
+#        "once per boot" atomic across concurrent triggers and daemon restarts.
+# ---------------------------------------------------------------------------
+
+_V4_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE instrumentation_auto_runs (
+        instance TEXT NOT NULL,
+        profile_id TEXT NOT NULL,
+        boot_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (instance, profile_id, boot_id)
+    )
+    """,
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="core schema", statements=_V1_STATEMENTS),
     Migration(version=2, name="runs and oobe records", statements=_V2_STATEMENTS),
     Migration(version=3, name="root and instrumentation", statements=_V3_STATEMENTS),
+    Migration(version=4, name="instrumentation auto runs", statements=_V4_STATEMENTS),
 )
 
 

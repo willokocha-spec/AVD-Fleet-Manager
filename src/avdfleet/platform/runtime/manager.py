@@ -15,7 +15,9 @@ Lifecycle and guarantees:
   ``instance.state`` events.  ``dry_run`` returns the plan without spawning.
 * ``wait_boot`` polls ``sys.boot_completed`` *and* ``pm path android`` through
   ``adb`` with the configured timeout; on timeout it force-stops the instance,
-  marks it ``error`` and raises :class:`BootTimeoutError`.
+  marks it ``error`` and raises :class:`BootTimeoutError`.  A successful wait
+  (including one that observes an already-booted instance) invokes every
+  registered boot-completed hook; hook failures are logged and swallowed.
 * ``stop`` prefers the emulator console's graceful ``kill``, falls back to
   ``terminate`` then ``kill``, always releases ports and stops the proxy bridge.
 * ``supervisor`` notices external exits in the background and marks the instance
@@ -404,6 +406,7 @@ class RuntimeManagerService:
         self._allow_external = bool(allow_external_processes)
         self._lock = threading.RLock()
         self._records: dict[str, RunningInstance] = {}
+        self._boot_completed_hooks: list[Callable[[str], None]] = []
         self._state_store = RuntimeStateStore(store, self.paths)
         self._port_allocator = port_allocator or PortAllocator(
             start=int(self.config.port_range_start),
@@ -559,6 +562,31 @@ class RuntimeManagerService:
     def _emit_state(self, name: str, state: InstanceState, **extra: Any) -> None:
         # EventSink.on_instance_state publishes EventType.INSTANCE_STATE itself.
         self._sink.on_instance_state(name, state.value, **extra)
+
+    def on_boot_completed(self, callback: Callable[[str], None]) -> None:
+        """Register a callback invoked when an instance finishes booting.
+
+        This is the single trigger point for boot-time automation.  Every path
+        that observes boot completion goes through ``wait_boot`` (the HTTP
+        ``wait-boot`` route, the CLI, and a repeated wait on an instance that is
+        already booted), so callers do not each have to remember to fire it.
+
+        The callback receives the instance name.  Hook failures are logged and
+        swallowed: automation must never break an instance start or a boot wait.
+        """
+        if not callable(callback):
+            raise ValidationError("the boot-completed hook must be callable")
+        with self._lock:
+            self._boot_completed_hooks.append(callback)
+
+    def _notify_boot_completed(self, name: str) -> None:
+        with self._lock:
+            hooks = list(self._boot_completed_hooks)
+        for hook in hooks:
+            try:
+                hook(name)
+            except Exception:  # noqa: BLE001 - one broken hook must not fail a boot
+                logger.exception("boot-completed hook for %s failed", name)
 
     def _persist_state(
         self,
@@ -1153,6 +1181,7 @@ class RuntimeManagerService:
                 )
                 self._state_store.save(info)
                 self._emit_state(candidate, InstanceState.RUNNING, boot_completed=True)
+                self._notify_boot_completed(candidate)
                 return info
             if self._poll(record) is not None:
                 self._handle_process_exit(candidate, record.last_exit_code)
@@ -1160,8 +1189,18 @@ class RuntimeManagerService:
                     f"instance {candidate!r} exited while waiting for boot",
                     hint="Check the emulator log.",
                 )
-            record.state = InstanceState.BOOTING
-            self._persist_record(record)
+            already_booted = bool(record.boot_completed)
+            if not already_booted:
+                record.state = InstanceState.BOOTING
+                self._persist_record(record)
+        if already_booted:
+            # A repeated wait on the same boot is still a boot-completed
+            # observation; the hook (and its once-per-boot guard) decides whether
+            # anything needs doing.
+            with self._lock:
+                info = self._persist_record(record)
+            self._notify_boot_completed(candidate)
+            return info
         self._emit_state(candidate, InstanceState.BOOTING, pid=record.pid)
         status = self._boot.wait(
             record.adb_serial or boot_serial(record.ports),
@@ -1192,6 +1231,7 @@ class RuntimeManagerService:
                 source="platform.runtime",
             )
             logger.info("instance %s booted in %.1fs", candidate, status.seconds)
+            self._notify_boot_completed(candidate)
             return info
         # Boot failed: always clean up the process before surfacing the error.
         error = status.last_error or "instance did not finish booting"

@@ -6,9 +6,13 @@ info:
 
     unless `auth_required` is disabled. The token is stored in the data directory
 
-    with owner-only permissions. WebSocket clients pass the token as `?token=`
+    with owner-only permissions. WebSocket clients authenticate with a short-lived,
 
-    and must send an allowed Origin.
+    single-use ticket issued by `POST /api/v1/auth/ws-ticket` and passed as
+
+    `?ticket=`; native clients may use `Authorization: Bearer` instead. Both must
+
+    send an allowed Origin when one is present.
 
 
     Secrets are never returned: proxy passwords are always masked, and error
@@ -61,6 +65,27 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthCheck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/ws-ticket:
+    post:
+      tags:
+      - system
+      operationId: issueWsTicket
+      summary: Issue a single-use ticket for the WebSocket handshake
+      description: >-
+        Browsers cannot set an Authorization header on a WebSocket handshake, so
+        the GUI obtains a short-lived, single-use ticket here (with normal bearer
+        authentication) and passes it as `?ticket=`. The ticket is opaque,
+        high-entropy, never derived from the token, burned on first use and
+        rejected once expired. The response is not cached.
+      responses:
+        '200':
+          description: Ticket issued (single use, short lived)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WsTicket'
         '401':
           $ref: '#/components/responses/Unauthorized'
   /api/v1/system:
@@ -2520,6 +2545,19 @@ components:
           type:
           - string
           - 'null'
+    WsTicket:
+      type: object
+      required:
+      - ticket
+      - expires_in
+      properties:
+        ticket:
+          type: string
+          description: Opaque single-use ticket for one WebSocket handshake.
+        expires_in:
+          type: integer
+          minimum: 0
+          description: Ticket lifetime in seconds (at most 60).
     AcceleratorInfo:
       type: object
       properties:

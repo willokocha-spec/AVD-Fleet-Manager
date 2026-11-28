@@ -615,7 +615,8 @@ function AccessCard({ dataDir }: { dataDir?: string }) {
         <div className="kv-list__row">
           <dt>Transport</dt>
           <dd>
-            <code>Authorization: Bearer</code> · WebSocket <code>?token=</code>
+            <code>Authorization: Bearer</code> · WebSocket <code>?ticket=</code>{" "}
+            <Badge tone="neutral">single use</Badge>
           </dd>
         </div>
       </dl>
@@ -625,6 +626,11 @@ function AccessCard({ dataDir }: { dataDir?: string }) {
           permissions, or reads <code>AVDFLEET_TOKEN</code> when that environment variable is set.
           To rotate the token, stop the daemon, remove the file and start it again — then
           reconnect from the connect screen.
+        </p>
+        <p>
+          WebSocket sessions authenticate with a short-lived, single-use ticket fetched from{" "}
+          <code>POST /api/v1/auth/ws-ticket</code>; every reconnect fetches a new ticket, so the
+          bearer token never travels in a URL or the daemon log.
         </p>
       </InlineNotice>
       <div style={{ marginTop: "var(--space-3)" }}>

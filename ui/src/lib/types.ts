@@ -842,6 +842,11 @@ export interface ProfileStep {
   params: Record<string, unknown>;
 }
 
+export interface AutoProfileView {
+  instance: string;
+  profile_id: string;
+}
+
 export interface InstrumentationProfile {
   id: string;
   name: string;

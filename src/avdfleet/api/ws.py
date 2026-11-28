@@ -2,12 +2,24 @@
 
 Authentication
 --------------
-Both sockets require the daemon bearer token, supplied either as ``?token=``
-(browsers cannot set headers on a WebSocket) or in the ``Authorization: Bearer``
-header (CLI/native clients).  ``Origin`` is checked against
-``config.allow_origins`` whenever it is present; browsers always send it, so a
-malicious page cannot open a socket.  A request without ``Origin`` is treated as
-a non-browser client and accepted.
+Both sockets require the daemon bearer token.  Browsers cannot set an
+``Authorization`` header on a WebSocket handshake, so the GUI first obtains a
+short-lived, **single-use ticket** from ``POST /api/v1/auth/ws-ticket`` (bearer
+authenticated) and passes it as ``?ticket=``.  A ticket is burned on the first
+handshake that presents it and rejected (``4401``) on replay or expiry.  When a
+``ticket`` parameter is present it is authoritative: an invalid ticket is never
+silently upgraded to another credential.
+
+CLI/native clients may instead send ``Authorization: Bearer <token>``.  The
+legacy ``?token=`` query parameter is retained for older clients but **deprecated**
+for the WebSocket: uvicorn logs the WebSocket request line (including the query
+string) at INFO on ``uvicorn.error``, so a token in the URL is written to daemon
+output.  ``serve.py`` attaches a redaction filter to uvicorn's loggers as
+defence in depth for both forms.
+
+``Origin`` is checked against ``config.allow_origins`` whenever it is present;
+browsers always send it, so a malicious page cannot open a socket.  A request
+without ``Origin`` is treated as a non-browser client and accepted.
 
 Close codes (documented contract)
 ---------------------------------
@@ -62,7 +74,7 @@ from avdfleet.core.errors import AvdFleetError, ScreenError
 from avdfleet.core.events import Event, EventType
 from avdfleet.core.logging import redact
 
-from .auth import TokenStore, origin_allowed, token_for_websocket
+from .auth import TokenStore, origin_allowed, token_for_websocket, websocket_tickets
 from .container import ContainerAdapter
 
 logger = logging.getLogger("avdfleet.api.ws")
@@ -113,6 +125,26 @@ def _event_bus(websocket: WebSocket) -> Any | None:
     return None
 
 
+def _query_value(websocket: WebSocket, name: str) -> str | None:
+    """Return a stripped, non-empty query parameter value, if present."""
+    try:
+        value = websocket.query_params.get(name)
+    except AttributeError:  # pragma: no cover - defensive
+        return None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _redeem_ticket(websocket: WebSocket, ticket: str) -> bool:
+    """Burn *ticket*; return True only for a fresh, valid ticket."""
+    try:
+        return websocket_tickets(websocket.app.state).redeem(ticket)
+    except Exception:  # pragma: no cover - a store failure must not crash the handshake
+        logger.warning("WebSocket ticket store failed", exc_info=True)
+        return False
+
+
 async def _reject(websocket: WebSocket, code: int, reason: str) -> None:
     """Close before ``accept()``; this rejects the WebSocket handshake."""
     logger.info("rejecting WebSocket %s: %s (%s)", websocket.url.path, reason, code)
@@ -142,13 +174,24 @@ async def _safe_close(websocket: WebSocket, code: int, reason: str) -> None:
 
 
 async def _authorize(websocket: WebSocket) -> bool:
-    """Validate Origin and bearer token, closing the handshake on failure."""
+    """Validate Origin and credentials, closing the handshake on failure.
+
+    A ``?ticket=`` parameter is authoritative when present and is burned on
+    first use.  Otherwise the ``Authorization: Bearer`` header is used, with the
+    legacy ``?token=`` query parameter still accepted for older clients.
+    """
     config = _config(websocket)
     origin = websocket.headers.get("origin")
     if not origin_allowed(origin, list(getattr(config, "allow_origins", []) or [])):
         await _reject(websocket, CLOSE_FORBIDDEN, "origin not allowed")
         return False
     if not bool(getattr(config, "auth_required", True)):
+        return True
+    ticket = _query_value(websocket, "ticket")
+    if ticket is not None:
+        if not _redeem_ticket(websocket, ticket):
+            await _reject(websocket, CLOSE_UNAUTHORIZED, "invalid or expired ticket")
+            return False
         return True
     store = _token_store(websocket)
     token = token_for_websocket(websocket)

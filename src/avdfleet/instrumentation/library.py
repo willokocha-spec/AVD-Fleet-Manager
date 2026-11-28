@@ -17,18 +17,25 @@ from __future__ import annotations
 
 import hashlib
 import io
+import ipaddress
 import re
+import socket
 import subprocess
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from ..core.errors import ValidationError
 from ..core.logging import get_logger
 from ..core.models import utcnow
 from .capabilities import classify_magisk_module, parse_module_prop
 from .models import ModuleKind, ModuleRecord
+
+if TYPE_CHECKING:
+    import httpx
 
 logger = get_logger("avdfleet.instrumentation.library")
 
@@ -124,12 +131,16 @@ def _safe_url(url: str) -> str:
     ``source_url`` is persisted and served by the API, so a credentialed or
     signed URL must not be stored verbatim.
     """
-    from urllib.parse import urlsplit, urlunsplit
-
     parts = urlsplit(url)
     host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if port:
+        host = f"{host}:{port}"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
     query = "&".join(
         f"{item.split('=', 1)[0]}=<redacted>" for item in parts.query.split("&") if item
     )
@@ -146,11 +157,17 @@ class ModuleLibrary:
         aapt_path: str | None = None,
         http_get: Any | None = None,
         allow_insecure_urls: bool = False,
+        allow_private_hosts: bool = False,
+        http_client_factory: Any | None = None,
     ) -> None:
         self._root = Path(root)
         self._aapt = aapt_path
         self._http_get = http_get
         self._allow_insecure = bool(allow_insecure_urls)
+        # Opt-out for tests and a deliberate local mirror; kept keyword-only so
+        # the long-standing constructor stays backward compatible.
+        self._allow_private_hosts = bool(allow_private_hosts)
+        self._http_client_factory = http_client_factory
 
     # -- storage ---------------------------------------------------------
     @property
@@ -376,38 +393,218 @@ class ModuleLibrary:
                 "refusing to import over plain HTTP",
                 hint="use an https URL, or enable insecure URLs explicitly in the configuration",
             )
-        fetch = self._http_get or _default_http_get
-        data = fetch(parsed, MAX_MODULE_BYTES)
+        if self._http_get is not None:
+            data = self._http_get(parsed, MAX_MODULE_BYTES)
+        else:
+            data = _default_http_get(
+                parsed,
+                MAX_MODULE_BYTES,
+                allow_private_hosts=self._allow_private_hosts,
+                client_factory=self._http_client_factory,
+            )
         filename = Path(parsed.split("?", 1)[0]).name or "module.bin"
         return self.build_record(
             data, filename, source="url", source_url=_safe_url(parsed)
         )
 
 
-def _default_http_get(url: str, limit: int) -> bytes:  # pragma: no cover - network
+#: Status codes that a manual redirect follower treats as a redirect.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+#: How many redirects one download may follow; the next redirect is refused.
+_MAX_REDIRECTS = 5
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+#: Address classes that must never be reached through a redirect.
+_BLOCKED_ADDRESS_ATTRIBUTES = (
+    ("is_loopback", "loopback"),
+    ("is_link_local", "link-local"),
+    ("is_private", "private"),
+    ("is_reserved", "reserved"),
+)
+
+
+def _new_http_client() -> httpx.Client:
+    """Build the client used when the caller does not inject one."""
     import httpx
 
-    with (
-        httpx.Client(follow_redirects=True, timeout=120.0) as client,
-        client.stream("GET", url) as response,
-    ):
-        response.raise_for_status()
-        # The guard in import_url only sees the initial URL; httpx follows redirects,
-        # so verify the URL actually being read did not downgrade the scheme.
-        final = str(response.url)
-        if url.lower().startswith("https://") and not final.lower().startswith("https://"):
+    return httpx.Client(follow_redirects=False, timeout=120.0)
+
+
+def _blocked_address_reason(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> str | None:
+    """Return why *address* is not publicly routable, or ``None`` when it is.
+
+    IPv4-mapped IPv6 addresses are unwrapped so ``::ffff:127.0.0.1`` cannot
+    smuggle a loopback destination past the check.
+    """
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = [address]
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        candidates.append(mapped)
+    for candidate in candidates:
+        for attribute, reason in _BLOCKED_ADDRESS_ATTRIBUTES:
+            if getattr(candidate, attribute):
+                return reason
+    return None
+
+
+def _resolve_download_addresses(
+    url: str, host: str, port: int
+) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Resolve *host* for a download and reject unresolvable names."""
+    try:
+        return [ipaddress.ip_address(host)]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValidationError(
+            f"could not resolve the download host: {_safe_url(url)}",
+            hint="check the source URL and network access",
+        ) from exc
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise ValidationError(
+            f"could not resolve the download host: {_safe_url(url)}",
+            hint="check the source URL and network access",
+        )
+    return addresses
+
+
+def _check_download_hop(
+    url: str, *, original_scheme: str, allow_private_hosts: bool
+) -> None:
+    """Vet one hop (the initial URL or a redirect target) before requesting it."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS:
+        raise ValidationError(
+            f"unsupported download URL: {_safe_url(url)}",
+            hint="only http(s) URLs can be imported",
+        )
+    if original_scheme == "https" and scheme != "https":
+        raise ValidationError(
+            f"the download was redirected to an insecure URL: {_safe_url(url)}",
+            hint="nothing was stored; use an https source that does not redirect",
+        )
+    if allow_private_hosts:
+        return
+    host = parts.hostname
+    if not host:
+        raise ValidationError(
+            f"the download URL has no host: {_safe_url(url)}",
+            hint="nothing was stored; check the source URL",
+        )
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValidationError(
+            f"invalid port in the download URL: {_safe_url(url)}",
+        ) from exc
+    if port is None:
+        port = _DEFAULT_PORTS[scheme]
+    for address in _resolve_download_addresses(url, host, port):
+        reason = _blocked_address_reason(address)
+        if reason is not None:
             raise ValidationError(
-                f"the download was redirected to an insecure URL: {final}",
-                hint="nothing was stored; use an https source that does not redirect",
+                f"refusing to download from a non-public address: {_safe_url(url)}"
+                f" ({reason}: {address})",
+                hint=(
+                    "use an https source that does not redirect, or allow private hosts"
+                    " explicitly"
+                ),
             )
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in response.iter_bytes():
-            total += len(chunk)
-            if total > limit:
-                raise ValidationError(f"download exceeded the {limit} byte limit")
-            chunks.append(chunk)
-    return b"".join(chunks)
+
+
+def _default_http_get(
+    url: str,
+    limit: int,
+    *,
+    allow_private_hosts: bool = False,
+    client_factory: Callable[[], httpx.Client] | None = None,
+) -> bytes:
+    """Download *url*, following at most :data:`_MAX_REDIRECTS` redirects.
+
+    Redirects are followed manually, never by httpx itself, so every hop is
+    vetted before a request is made:
+
+    * an https source can never be redirected to a non-https URL, so no bytes
+      are sent to the downgraded URL;
+    * a hop that resolves to a loopback, link-local, private or reserved
+      address is refused (both IPv4 and IPv6, including literal IPs), unless
+      *allow_private_hosts* opts out for tests or a deliberate local mirror.
+
+    Error messages only ever contain the redacted form of a URL, produced by
+    :func:`_safe_url`, so query-string signatures and userinfo cannot leak.
+    """
+    import httpx
+
+    original_scheme = urlsplit(url).scheme.lower()
+    factory = client_factory if client_factory is not None else _new_http_client
+    current = url
+    redirects = 0
+    try:
+        with factory() as client:
+            while True:
+                _check_download_hop(
+                    current,
+                    original_scheme=original_scheme,
+                    allow_private_hosts=allow_private_hosts,
+                )
+                with client.stream("GET", current, follow_redirects=False) as response:
+                    if response.status_code in _REDIRECT_STATUSES:
+                        location = response.headers.get("location", "").strip()
+                        if not location:
+                            raise ValidationError(
+                                "the download was redirected without a Location header:"
+                                f" {_safe_url(current)}",
+                                hint="nothing was stored; use a direct link",
+                            )
+                        if redirects >= _MAX_REDIRECTS:
+                            raise ValidationError(
+                                f"too many redirects (at most {_MAX_REDIRECTS} are"
+                                f" followed) while downloading {_safe_url(url)}",
+                                hint="nothing was stored; use a direct link",
+                            )
+                        redirects += 1
+                        current = urljoin(current, location)
+                        continue
+                    if response.status_code >= 400:
+                        raise ValidationError(
+                            f"download failed with HTTP {response.status_code}:"
+                            f" {_safe_url(current)}",
+                            hint="nothing was stored; check the source URL",
+                        )
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > limit:
+                            raise ValidationError(
+                                f"download exceeded the {limit} byte limit"
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+    except httpx.HTTPError as exc:
+        # httpx's own message can embed the full URL, so only the redacted URL
+        # and the exception class cross this boundary.
+        raise ValidationError(
+            f"could not download {_safe_url(current)}",
+            hint=f"network error while downloading ({type(exc).__name__})",
+        ) from exc
+    except httpx.InvalidURL as exc:
+        raise ValidationError(
+            f"invalid download URL: {_safe_url(current)}",
+            hint="nothing was stored; check the source URL",
+        ) from exc
 
 
 def _safe_filename(name: str) -> str:

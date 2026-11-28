@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
 import zipfile
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -284,6 +286,7 @@ def _service_with_runner(
     *,
     events: Any | None = None,
     running: dict[str, bool] | None = None,
+    settings: Any | None = None,
 ) -> InstrumentationService:
     states = dict(running or {})
 
@@ -304,6 +307,7 @@ def _service_with_runner(
         resolve,
         acquisition=AcquisitionStore(tmp_path / "toolchain", http_get=downloads),
         events=events,
+        settings=settings,
     )
 
 
@@ -334,10 +338,10 @@ def _target(api_level: int = 34) -> TargetDevice:
 # ---------------------------------------------------------------------------
 def test_store_initialize_applies_instrumentation_migration(store: Store) -> None:
     applied = store.applied_migrations()
-    assert [version for version, _name, _at in applied] == [1, 2, 3]
-    assert max(version for version, _name, _at in applied) == 3
-    assert store.schema_version == 3
-    assert SCHEMA_VERSION == 3
+    assert [version for version, _name, _at in applied] == [1, 2, 3, 4]
+    assert max(version for version, _name, _at in applied) == 4
+    assert store.schema_version == 4
+    assert SCHEMA_VERSION == 4
 
     with store.database.connect() as conn:
         tables = {
@@ -349,6 +353,7 @@ def test_store_initialize_applies_instrumentation_migration(store: Store) -> Non
         "instrumentation_profiles",
         "instrumentation_runs",
         "instrumentation_logs",
+        "instrumentation_auto_runs",
     } <= tables
 
 
@@ -2073,3 +2078,242 @@ def test_dialog_target_prefers_the_confirm_button_over_the_message() -> None:
     target = _pick_dialog_target(root, ("ok", "allow", "proceed", "yes", "reboot"))
 
     assert target == (890, 1348)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle automation: exactly one run per boot, claimed in the database
+# ---------------------------------------------------------------------------
+BOOT_SERIALNO = "EMULATOR34X1"
+BOOT_ID = "3f2c1b6e-6a2f-4b3e-9d6a-0a1b2c3d4e5f"
+
+
+def _boot_script(*, boot_id: str = BOOT_ID, serialno: str = BOOT_SERIALNO) -> ScriptedAdb:
+    """A Magisk-rooted device whose kernel boot identity is scripted.
+
+    ``ro.boot.serialno`` and ``/proc/sys/kernel/random/boot_id`` are what the
+    service reads; leaving one out models an image where the probe fails.
+    """
+    script = _magisk_script()
+    if serialno:
+        script.responses["getprop ro.boot.serialno"] = (0, f"{serialno}\n")
+    if boot_id:
+        script.responses["cat /proc/sys/kernel/random/boot_id"] = (0, f"{boot_id}\n")
+    return script
+
+
+def _auto_service(
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+    runner: ScriptedAdb,
+    *,
+    settings: Any,
+) -> InstrumentationService:
+    return _service_with_runner(
+        repository, library, tmp_path, downloads, runner, settings=settings
+    )
+
+
+def _bind_auto(service: InstrumentationService, instance: str = "avd-01") -> InstrumentationProfile:
+    profile = service.save_profile(
+        profile_id=None, name=f"Auto {instance}", steps=[{"action": "verify_root"}]
+    )
+    service.set_auto_profile(instance, profile.id)
+    return profile
+
+
+def _auto_rows(store: Store) -> list[Any]:
+    with store.database.connect() as conn:
+        return list(
+            conn.execute(
+                "SELECT instance, profile_id, boot_id, run_id FROM instrumentation_auto_runs"
+            ).fetchall()
+        )
+
+
+def test_try_auto_profile_queues_one_run_and_records_the_boot_key(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """The run carries the boot identity that authorised it."""
+    service = _auto_service(
+        repository, library, tmp_path, downloads, _boot_script(), settings=store.settings
+    )
+    profile = _bind_auto(service)
+
+    run = service.try_auto_profile("avd-01")
+
+    assert run is not None
+    assert run.profile_id == profile.id
+    assert run.targets == ["avd-01"]
+    assert [candidate.id for candidate in service.list_runs()] == [run.id]
+    rows = _auto_rows(store)
+    assert len(rows) == 1
+    assert rows[0]["instance"] == "avd-01"
+    assert rows[0]["profile_id"] == profile.id
+    assert rows[0]["boot_id"] == f"{BOOT_SERIALNO}:{BOOT_ID}"
+    assert rows[0]["run_id"] == run.id
+    assert any("queued automatically" in entry.message for entry in service.logs(run.id))
+
+
+def test_try_auto_profile_skips_a_second_trigger_on_the_same_boot(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """A second wait-boot for the same kernel boot must not queue again."""
+    service = _auto_service(
+        repository, library, tmp_path, downloads, _boot_script(), settings=store.settings
+    )
+    _bind_auto(service)
+
+    first = service.try_auto_profile("avd-01")
+    second = service.try_auto_profile("avd-01")
+
+    assert first is not None
+    assert second is None
+    assert len(service.list_runs()) == 1
+    assert len(_auto_rows(store)) == 1
+
+
+def test_try_auto_profile_does_not_retrigger_after_the_run_finished(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """A finished run on this boot still counts as already applied."""
+    service = _auto_service(
+        repository, library, tmp_path, downloads, _boot_script(), settings=store.settings
+    )
+    _bind_auto(service)
+
+    run = service.try_auto_profile("avd-01")
+    assert run is not None
+    finished = service.execute_run(run.id)
+    assert finished.state is RunState.SUCCEEDED
+
+    assert service.try_auto_profile("avd-01") is None
+    assert len(service.list_runs()) == 1
+
+
+def test_try_auto_profile_queues_again_on_a_new_boot(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """Deduplication keys on the boot, never on the state of earlier runs."""
+    script = _boot_script()
+    service = _auto_service(
+        repository, library, tmp_path, downloads, script, settings=store.settings
+    )
+    _bind_auto(service)
+
+    first = service.try_auto_profile("avd-01")
+    # The first run stays queued: a state scan would wrongly refuse the next boot.
+    script.responses["cat /proc/sys/kernel/random/boot_id"] = (0, "second-boot\n")
+    second = service.try_auto_profile("avd-01")
+
+    assert first is not None
+    assert second is not None
+    assert second.id != first.id
+    assert len(service.list_runs()) == 2
+    assert {row["boot_id"] for row in _auto_rows(store)} == {
+        f"{BOOT_SERIALNO}:{BOOT_ID}",
+        f"{BOOT_SERIALNO}:second-boot",
+    }
+
+
+def test_try_auto_profile_two_concurrent_triggers_create_one_run(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """Uniqueness is enforced by the composite primary key, not by a read check."""
+    service = _auto_service(
+        repository, library, tmp_path, downloads, _boot_script(), settings=store.settings
+    )
+    _bind_auto(service)
+
+    barrier = threading.Barrier(2, timeout=10)
+
+    def trigger() -> DeploymentRun | None:
+        barrier.wait()
+        return service.try_auto_profile("avd-01")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(trigger), pool.submit(trigger)]
+        queued = [result.result() for result in results]
+
+    winners = [run for run in queued if run is not None]
+    assert len(winners) == 1
+    assert len(service.list_runs()) == 1
+    assert len(_auto_rows(store)) == 1
+
+
+def test_try_auto_profile_fails_closed_without_a_boot_identity(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """Without a boot key uniqueness cannot be guaranteed, so nothing is queued."""
+    service = _auto_service(
+        repository,
+        library,
+        tmp_path,
+        downloads,
+        _boot_script(boot_id=""),
+        settings=store.settings,
+    )
+    _bind_auto(service)
+
+    assert service.try_auto_profile("avd-01") is None
+    assert service.list_runs() == []
+    assert _auto_rows(store) == []
+
+
+def test_try_auto_profile_without_a_binding_returns_none(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    service = _auto_service(
+        repository, library, tmp_path, downloads, _boot_script(), settings=store.settings
+    )
+
+    assert service.try_auto_profile("avd-01") is None
+    assert service.list_runs() == []
+    assert _auto_rows(store) == []
+
+
+def test_try_auto_profile_swallows_a_missing_profile(
+    store: Store,
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """A dangling binding is logged, never raised and never partially recorded."""
+    service = _auto_service(
+        repository, library, tmp_path, downloads, _boot_script(), settings=store.settings
+    )
+    store.settings.set(InstrumentationService.AUTO_PROFILE_KEY, {"avd-01": "prof_missing"})
+
+    assert service.try_auto_profile("avd-01") is None
+    assert service.list_runs() == []
+    assert _auto_rows(store) == []

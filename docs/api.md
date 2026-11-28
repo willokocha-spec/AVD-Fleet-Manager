@@ -2,7 +2,7 @@
 
 The daemon exposes a REST API under `/api/v1` plus two WebSocket endpoints. The
 frozen OpenAPI 3.1 contract is checked in at
-[contracts/openapi.yaml](../contracts/openapi.yaml) (72 paths, 91 operations) and
+[contracts/openapi.yaml](../contracts/openapi.yaml) (73 paths, 92 operations) and
 served by a running daemon at `/openapi.json`, with interactive docs at `/docs`
 (disable with `AVDFLEET_DOCS=0`).
 
@@ -55,6 +55,7 @@ See [security.md](security.md) for the full security model.
 |---|---|
 | `GET /health` | Liveness (no auth): `status`, `version`, `uptime_s`, `emulator_available`, `database` |
 | `GET /api/v1/auth/check` | Validate the bearer token (`ok`) |
+| `POST /api/v1/auth/ws-ticket` | Issue a single-use WebSocket ticket (`{"ticket", "expires_in"}`) |
 | `GET /api/v1/system` | Host + runtime info (OS, arch, RAM, disk, hypervisor, edition, SDK/data dirs) |
 | `GET /api/v1/config` | Effective configuration (no secrets) |
 | `PATCH /api/v1/config` | Update a whitelisted subset (`headless`, `gpu_mode`, `max_instances`, `default_ram_mb`, `theme`, `log_level`) |
@@ -275,14 +276,31 @@ curl -s -X POST -H "$AUTH" -H "Content-Type: application/json" \
 
 ## WebSockets
 
-Both endpoints require the token as `?token=<token>` (browsers cannot set
-WebSocket headers; native clients may use `Authorization: Bearer`) **and** an
-`Origin` in `config.allow_origins` when an Origin header is present. A rejected
-handshake is observed as HTTP 403; the documented close codes are:
+Both endpoints prefer a **single-use ticket**. `POST /api/v1/auth/ws-ticket`
+(bearer-authenticated, like every other `/api/v1` route) returns
+`{"ticket": "<opaque>", "expires_in": 30}`; the client passes it as
+`?ticket=<ticket>`. Tickets are high-entropy values that are never derived from
+the token, are stored only hashed in daemon memory, are burned on the first
+handshake (a replayed ticket is rejected with `4401`) and expire after at most
+60 s. The ticket response is `Cache-Control: no-store`.
+
+Native/CLI clients may instead send `Authorization: Bearer <token>`. The legacy
+`?token=` query parameter is still accepted for older clients but is
+**deprecated**: uvicorn logs the WebSocket request line (including the query
+string) at INFO on `uvicorn.error` even with `access_log=False`, so a token in a
+URL reaches the daemon's output and log file. As defence in depth, `avdfleet
+serve` installs a redaction filter on uvicorn's `error`/`access` output that
+masks `?token=` and `?ticket=` values.
+
+When a `ticket` parameter is present it is authoritative: an invalid ticket is
+never silently upgraded to the token path. A socket also requires an `Origin` in
+`config.allow_origins` when an Origin header is present; a request without one is
+treated as a non-browser client. A rejected handshake is observed as HTTP 403;
+the documented close codes are:
 
 | Code | Meaning |
 |---|---|
-| `4401` | Missing/invalid token (rejected before `accept()`) |
+| `4401` | Missing/invalid credentials — invalid, replayed or expired ticket, or bad token (rejected before `accept()`) |
 | `4403` | Origin not allowed |
 | `4400` | Malformed request parameters (reserved) |
 | `4503` | Screen streaming unavailable (accepted, error frame then close) |
@@ -311,12 +329,21 @@ to 50 recent history events, then live events. A `system` event with
 text frames are ignored (broadcast channel).
 
 ```javascript
-const ws = new WebSocket(`ws://127.0.0.1:8765/ws/events?token=${token}`);
+// Browsers cannot set WebSocket headers: fetch a fresh single-use ticket first.
+const issued = await fetch("/api/v1/auth/ws-ticket", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${token}` },
+});
+const { ticket } = await issued.json();
+const ws = new WebSocket(`ws://127.0.0.1:8765/ws/events?ticket=${ticket}`);
 ws.onmessage = (event) => {
   const evt = JSON.parse(event.data);
   if (evt.type === "script.run.output") console.log(evt.payload.instance, evt.payload.line);
 };
 ```
+
+Every reconnect needs a fresh ticket: a ticket is burned by the handshake that
+uses it.
 
 ### `/ws/instances/{name}/screen`
 

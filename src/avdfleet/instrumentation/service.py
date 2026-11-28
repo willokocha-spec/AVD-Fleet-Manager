@@ -169,32 +169,113 @@ class InstrumentationService:
         return self.get_auto_profile(name)
 
     def try_auto_profile(self, instance: str) -> DeploymentRun | None:
-        """Queue the configured profile for *instance*, or return None.
+        """Queue the profile bound to *instance*, once for the current guest boot.
 
-        The caller executes the returned run (the API does it on a worker thread) so
-        a slow deployment never delays the start response.
+        The boot identity (``ro.boot.serialno`` plus
+        ``/proc/sys/kernel/random/boot_id``) is claimed atomically in the
+        database before the run is created, so a repeated trigger for the same
+        boot -- including two concurrent ones -- can only create one run.  The
+        caller executes the returned run (the container does it on a worker
+        thread) so a slow deployment never delays boot handling.
+
+        Every failure is logged and swallowed: automation must never break an
+        instance start.
         """
-        profile_id = self._auto_map().get(instance)
+        try:
+            profile_id = self._auto_map().get(instance)
+        except Exception as exc:  # noqa: BLE001 - a broken setting is not a boot failure
+            logger.warning("auto profile for %s could not read the binding: %s", instance, exc)
+            return None
         if not profile_id:
             return None
-        for candidate in self._repo.list_runs(50):
-            if (
-                candidate.profile_id == profile_id
-                and instance in candidate.targets
-                and candidate.state in (RunState.QUEUED, RunState.RUNNING)
-            ):
-                return None
+        try:
+            self.get_profile(profile_id)
+        except AvdFleetError as exc:
+            logger.warning(
+                "auto profile for %s points at an unavailable profile: %s",
+                instance,
+                exc.message,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - defensive: automation is best effort
+            logger.warning("auto profile for %s could not load its profile: %s", instance, exc)
+            return None
+        boot_key = self._boot_key(instance)
+        if boot_key is None:
+            return None
+        try:
+            run_id = self._repo.claim_auto_run(instance, profile_id, boot_key)
+        except Exception as exc:  # noqa: BLE001 - a storage failure must not escape
+            logger.warning(
+                "auto profile for %s could not claim boot %s: %s", instance, boot_key, exc
+            )
+            return None
+        if run_id is None:
+            logger.info("auto profile for %s already ran on boot %s", instance, boot_key)
+            return None
         try:
             run = self.start_run(
                 profile_id=profile_id,
                 targets=[instance],
-                label=f"auto on start: {instance}",
+                label=f"auto on boot: {instance}",
+                run_id=run_id,
             )
-        except AvdFleetError as exc:
-            logger.warning("auto profile for %s could not start: %s", instance, exc.message)
+        except Exception as exc:  # noqa: BLE001 - release the claim, never raise
+            self._repo.release_auto_run(instance, profile_id, boot_key)
+            logger.warning(
+                "auto profile for %s could not start: %s", instance, redact(str(exc))
+            )
             return None
-        self._log(run.id, instance, "queued automatically when the instance started")
+        self._log(
+            run.id,
+            instance,
+            f"queued automatically when the instance booted (boot {boot_key})",
+        )
         return run
+
+    #: Commands that identify one guest boot on both API 25 and API 34.
+    BOOT_SERIALNO_COMMAND = "getprop ro.boot.serialno"
+    BOOT_ID_COMMAND = "cat /proc/sys/kernel/random/boot_id"
+
+    def _boot_key(self, instance: str) -> str | None:
+        """Return the boot identity for *instance*, or None when it is unknown.
+
+        ``ro.boot.serialno`` names the emulator and
+        ``/proc/sys/kernel/random/boot_id`` changes on every guest boot.  When the
+        id cannot be read there is no way to prove this boot has not already been
+        handled, so the caller fails closed instead of risking a second run.
+        """
+        try:
+            target = self._resolve(instance)
+        except Exception as exc:  # noqa: BLE001 - resolver failures are data here
+            logger.warning(
+                "auto profile for %s: cannot resolve the instance: %s",
+                instance,
+                getattr(exc, "message", str(exc)),
+            )
+            return None
+        if not target.running:
+            logger.info("auto profile for %s: the instance is not running", instance)
+            return None
+        serial = str(target.serial or "").strip()
+        if not serial:
+            logger.warning("auto profile for %s: the instance has no adb serial", instance)
+            return None
+        try:
+            serialno = self._prober.shell(serial, self.BOOT_SERIALNO_COMMAND).text()
+            boot_id = self._prober.shell(serial, self.BOOT_ID_COMMAND).text()
+        except Exception as exc:  # noqa: BLE001 - the adb boundary is not trusted
+            logger.warning(
+                "auto profile for %s: could not read the boot identity: %s", instance, exc
+            )
+            return None
+        if not boot_id:
+            logger.warning(
+                "auto profile for %s: the device reported no boot id; not queueing",
+                instance,
+            )
+            return None
+        return f"{serialno}:{boot_id}" if serialno else boot_id
 
     # -- toolchain acquisition --------------------------------------------
     def toolchain_status(self) -> dict[str, Any]:
@@ -354,13 +435,20 @@ class InstrumentationService:
         return results
 
     # -- deployments -----------------------------------------------------
-    def start_run(self, *, profile_id: str, targets: Iterable[str], label: str = "") -> DeploymentRun:
+    def start_run(
+        self,
+        *,
+        profile_id: str,
+        targets: Iterable[str],
+        label: str = "",
+        run_id: str | None = None,
+    ) -> DeploymentRun:
         profile = self.get_profile(profile_id)
         selected = _unique(targets)
         if not selected:
             raise ValidationError("select at least one AVD to deploy to")
         run = DeploymentRun(
-            id=f"irun_{uuid.uuid4().hex[:12]}",
+            id=run_id or f"irun_{uuid.uuid4().hex[:12]}",
             profile_id=profile.id,
             label=label or f"{profile.name} -> {len(selected)} AVD(s)",
             state=RunState.QUEUED,

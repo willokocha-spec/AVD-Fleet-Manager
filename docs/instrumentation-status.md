@@ -102,6 +102,23 @@ Legend: **done** = implemented *and* verified · **active** = in progress ·
 | `scripts/check_docs_links.py` | 255 links in 31 files, all resolve |
 | emulator e2e (`tests/e2e`) | not run in this pass; it boots real AVDs and was skipped to avoid colliding with the live verification |
 
+## Follow-up fix list (post-`b1e8ce0`)
+
+| # | Item | State |
+| --- | --- | --- |
+| 1 | Detached bridge discovery (stable digest, scan fallback, orphan cleanup) | done |
+| 2 | Bearer token in server logs (single-use WS ticket, logger redaction) | done |
+| 3 | Emulator log permissions (`0600` in a `0700` directory) | done (POSIX; tested in CI) |
+| 4 | Auto-profile on every start path + GUI control | done |
+| 5 | Auto-profile once per boot, atomic (`instrumentation_auto_runs`, schema v4) | done |
+| 6 | Auto-profile docs contradiction | done |
+| 7 | https-to-http redirect refused before the request; no query strings in errors | done |
+| 8 | Redirects to loopback/link-local/private/reserved addresses refused | done |
+| 9 | Wildcard bind accepts the loopback browser origin | done |
+| 10 | Guest-side bridge isolation proof | not run (needs a quiet emulator host; documented gap) |
+| 11 | 17+ instances under one adb server | not run (host capacity; documented gap) |
+| 12 | Lint gap (`scripts/` in ruff + CI) | done |
+
 ## Resume instructions
 
 1. `uv run pytest tests/unit tests/api tests/contract -q` — must stay green.

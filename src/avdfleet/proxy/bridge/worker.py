@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -74,9 +75,17 @@ def bridge_state_dir(paths: Paths) -> Path:
 
 
 def safe_instance_stem(instance: str) -> str:
-    """Filesystem-safe stem for one instance name (collision-resistant enough)."""
+    """Stable, filesystem-safe stem for one instance name.
+
+    The suffix **must not** come from the built-in ``hash()``: Python randomises
+    string hashes per interpreter, so a second CLI/daemon process would compute a
+    different file name, miss the live worker and report a stop that never
+    happened (and a restart could spawn a second worker).  A truncated SHA-256
+    digest is deterministic across processes and keeps the name short.
+    """
     safe = _UNSAFE_FILENAME_RE.sub("_", instance).strip("._") or "instance"
-    return f"{safe[:80]}-{abs(hash(instance)) & 0xFFFFFF:06x}"
+    digest = hashlib.sha256(instance.encode("utf-8")).hexdigest()[:6]
+    return f"{safe[:80]}-{digest}"
 
 
 def state_path(paths: Paths, instance: str) -> Path:
@@ -85,6 +94,25 @@ def state_path(paths: Paths, instance: str) -> Path:
 
 def stop_path(paths: Paths, instance: str) -> Path:
     return bridge_state_dir(paths) / f"{safe_instance_stem(instance)}.json.stop"
+
+
+def state_files(paths: Paths) -> list[Path]:
+    """Every published worker state file, whatever its naming scheme.
+
+    Legacy workers used a ``hash()``-suffixed stem, which differs per process;
+    callers that need to find one must match the file's ``"instance"`` field
+    instead of trusting the computed path.
+    """
+    directory = bridge_state_dir(paths)
+    try:
+        return sorted(path for path in directory.glob("*.json") if path.is_file())
+    except OSError:  # pragma: no cover - unreadable/deleted directory
+        return []
+
+
+def stop_file_for(state_file: Path) -> Path:
+    """The sentinel a worker owning *state_file* polls (``<stem>.json.stop``)."""
+    return state_file.with_name(f"{state_file.name}.stop")
 
 
 def read_state(path: Path) -> dict[str, Any] | None:

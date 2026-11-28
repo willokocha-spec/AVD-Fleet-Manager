@@ -50,6 +50,23 @@ _HEADLESS_GPU_FALLBACKS = frozenset({"auto", "host"})
 # ---------------------------------------------------------------------------
 
 
+def open_emulator_log(path: Path) -> Any:
+    """Open an emulator log with owner-only permissions.
+
+    The emulator writes its http_proxy (including the per-instance listener token)
+    into this file, so both the file and its directory must be private. POSIX only:
+    on Windows the ACL inherited from the data directory applies instead.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name != "posix":
+        return path.open("ab")
+    os.chmod(path.parent, 0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    handle = os.fdopen(descriptor, "ab")
+    os.chmod(path, 0o600)
+    return handle
+
+
 @runtime_checkable
 class ProcessHandle(Protocol):
     """The subset of ``subprocess.Popen`` the runtime manager needs."""
@@ -114,9 +131,7 @@ class SubprocessProcessFactory:
             kwargs["start_new_session"] = True
         handle = None
         if log_path is not None:
-            target = Path(log_path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            handle = target.open("ab")
+            handle = open_emulator_log(Path(log_path))
             kwargs["stdout"] = handle
             kwargs["stderr"] = subprocess.STDOUT
         try:

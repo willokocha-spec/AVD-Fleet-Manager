@@ -104,6 +104,59 @@ class BootstrapCodeStore:
             self._codes.clear()
 
 
+#: Default lifetime of a WebSocket ticket; deliberately far below one minute so a
+#: ticket captured from a request log is useless almost immediately.
+WS_TICKET_TTL_S = 30.0
+#: Hard upper bound for a WebSocket ticket lifetime (audit requirement: <= 60 s).
+WS_TICKET_MAX_TTL_S = 60.0
+
+
+class WebSocketTicketStore(BootstrapCodeStore):
+    """Short-lived, single-use tickets for the WebSocket handshake.
+
+    Browsers cannot set an ``Authorization`` header on a WebSocket, and putting
+    the long-lived bearer token in ``?token=`` writes it to uvicorn's request log
+    (``access_log=False`` does not suppress the WebSocket request line).  The GUI
+    therefore asks the authenticated REST API for a ticket and passes that
+    instead.
+
+    Tickets reuse the :class:`BootstrapCodeStore` machinery: high-entropy values
+    from :mod:`secrets` (never derived from the token), stored only as SHA-256
+    digests in memory, single use (burned on redemption) and short lived.  The
+    lifetime is capped at :data:`WS_TICKET_MAX_TTL_S`.
+    """
+
+    def __init__(self, *, ttl_s: float = WS_TICKET_TTL_S, clock: Any = time.monotonic) -> None:
+        super().__init__(ttl_s=min(float(ttl_s), WS_TICKET_MAX_TTL_S), clock=clock)
+
+
+#: Guards lazy creation of the per-application ticket store.  ``create_app``
+#: (owned elsewhere) does not seed the store, so the route and the WebSocket
+#: handler resolve it through :func:`websocket_tickets` and must agree on one
+#: instance.
+_TICKET_STORE_LOCK = threading.Lock()
+
+
+def websocket_tickets(app_state: Any) -> WebSocketTicketStore:
+    """Return the application's :class:`WebSocketTicketStore`.
+
+    The store is created on first use and cached on ``app.state`` so issuing and
+    redeeming share the same in-memory registry.  Tests may inject their own
+    store (for example one with a controllable clock) by setting
+    ``app.state.ws_ticket_store`` before the app serves requests.
+    """
+    existing = getattr(app_state, "ws_ticket_store", None)
+    if isinstance(existing, WebSocketTicketStore):
+        return existing
+    with _TICKET_STORE_LOCK:
+        existing = getattr(app_state, "ws_ticket_store", None)
+        if isinstance(existing, WebSocketTicketStore):
+            return existing
+        store = WebSocketTicketStore()
+        app_state.ws_ticket_store = store
+        return store
+
+
 def hash_token(token: str) -> bytes:
     """Return a fixed-length comparison value for *token*."""
     return hashlib.sha256(token.encode("utf-8")).digest()
@@ -341,12 +394,16 @@ __all__ = [
     "BootstrapCodeStore",
     "ENV_TOKEN",
     "TOKEN_BYTES",
+    "WS_TICKET_MAX_TTL_S",
+    "WS_TICKET_TTL_S",
     "WWW_AUTHENTICATE",
     "TokenStore",
     "TokenStoreError",
+    "WebSocketTicketStore",
     "extract_bearer",
     "hash_token",
     "origin_allowed",
     "token_for_websocket",
     "tokens_equal",
+    "websocket_tickets",
 ]

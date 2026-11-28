@@ -38,6 +38,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,9 @@ from .worker import (
     bridge_state_dir,
     read_state,
     safe_instance_stem,
+    state_files,
     state_path,
+    stop_file_for,
     stop_path,
     write_state,
 )
@@ -63,8 +66,13 @@ _LOGGER = get_logger("proxy.bridge.detached")
 DEFAULT_READY_TIMEOUT_S = 45.0
 _STOP_GRACE_S = 6.0
 
+#: Startup/doctor cleanup only touches a live worker for a stopped instance once
+#: its state file is this old, so a concurrent ``instances start`` cannot lose the
+#: worker it just spawned before the runtime persisted the instance as running.
+DEFAULT_ORPHAN_MIN_AGE_S = 60.0
 
-def _pid_alive(pid: int) -> bool:
+
+def pid_alive(pid: int) -> bool:
     """Return True when *pid* is a live process this user can see."""
     if pid <= 0:
         return False
@@ -91,6 +99,10 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+#: Internal alias kept for the module's existing call sites.
+_pid_alive = pid_alive
 
 
 class DetachedBridgeManager:
@@ -122,22 +134,42 @@ class DetachedBridgeManager:
     def _state_file(self, instance: str) -> Path:
         return state_path(self._paths, instance)
 
-    def _read(self, instance: str) -> dict[str, Any] | None:
-        data = read_state(self._state_file(instance))
-        if data is None:
-            return None
-        try:
-            pid = int(data.get("pid") or 0)
-        except (TypeError, ValueError):
-            return None
-        if not _pid_alive(pid):
-            # Self-heal: a crashed/terminated worker must not look active.
+    def _locate(self, instance: str) -> tuple[Path, dict[str, Any]] | None:
+        """Find the live state file for *instance*.
+
+        The computed (stable) path is tried first.  When it is missing -- most
+        importantly for workers spawned by older releases, whose file name used
+        the interpreter-randomised ``hash()`` suffix -- every published
+        ``*.json`` is scanned and matched on its ``"instance"`` field.  A file
+        whose recorded pid is dead is removed on the way through.
+        """
+        expected = self._state_file(instance)
+        candidates = [expected, *(path for path in state_files(self._paths) if path != expected)]
+        for path in candidates:
+            data = read_state(path)
+            if data is None or str(data.get("instance") or "") != instance:
+                continue
             try:
-                self._state_file(instance).unlink()
-            except OSError:
-                pass
-            return None
-        return data
+                pid = int(data.get("pid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            if not _pid_alive(pid):
+                # Self-heal: a crashed/terminated worker must not look active.
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                try:
+                    stop_file_for(path).unlink()
+                except OSError:
+                    pass
+                continue
+            return path, data
+        return None
+
+    def _read(self, instance: str) -> dict[str, Any] | None:
+        located = self._locate(instance)
+        return located[1] if located is not None else None
 
     def _bridge_config(self, data: dict[str, Any]) -> BridgeConfig:
         return BridgeConfig(
@@ -154,13 +186,8 @@ class DetachedBridgeManager:
         return self._bridge_config(data) if data is not None else None
 
     def list_active(self) -> list[BridgeConfig]:
-        directory = self.state_dir
-        if not directory.is_dir():
-            return []
         bridges: list[BridgeConfig] = []
-        for path in sorted(directory.glob("*.json")):
-            if path.name.endswith(".json.stop"):
-                continue
+        for path in state_files(self._paths):
             data = read_state(path)
             if data is None:
                 continue
@@ -171,6 +198,10 @@ class DetachedBridgeManager:
             if not _pid_alive(pid):
                 try:
                     path.unlink()
+                except OSError:
+                    pass
+                try:
+                    stop_file_for(path).unlink()
                 except OSError:
                     pass
                 continue
@@ -360,14 +391,21 @@ class DetachedBridgeManager:
 
     def stop(self, instance: str) -> None:
         instance = _validate_instance(instance)
-        state_file = self._state_file(instance)
-        data = read_state(state_file)
-        sentinel = stop_path(self._paths, instance)
-        if data is None and instance not in self._spawned:
+        located = self._locate(instance)
+        state_file = located[0] if located is not None else self._state_file(instance)
+        sentinel = stop_file_for(state_file)
+        pid = 0
+        if located is not None:
             try:
-                sentinel.unlink()
-            except OSError:
-                pass
+                pid = int(located[1].get("pid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+        if located is None and instance not in self._spawned:
+            for path in (sentinel, state_file):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             return
         try:
             sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -379,7 +417,7 @@ class DetachedBridgeManager:
                 time.sleep(0.05)
         finally:
             pass
-        self._terminate(instance)
+        self._terminate(instance, state_file=state_file, pid=pid)
         for path in (state_file, sentinel):
             try:
                 path.unlink()
@@ -391,6 +429,79 @@ class DetachedBridgeManager:
         for config in self.list_active():
             self.stop(config.instance)
 
+    # -- detached-worker capability (used by the daemon/container wiring) ----
+    def list_detached(self) -> list[BridgeConfig]:
+        """Live out-of-process workers, including ones started by another process."""
+        return self.list_active()
+
+    def stop_detached(self, instance: str) -> None:
+        """Stop an out-of-process worker owned by any process."""
+        self.stop(instance)
+
+    def cleanup_detached(
+        self,
+        is_running: Callable[[str], bool | None] | None = None,
+        *,
+        min_age_s: float = 0.0,
+    ) -> list[str]:
+        """Alias of :meth:`cleanup_orphans` for the container wiring."""
+        return self.cleanup_orphans(is_running=is_running, min_age_s=min_age_s)
+
+    def cleanup_orphans(
+        self,
+        is_running: Callable[[str], bool | None] | None = None,
+        *,
+        min_age_s: float = 0.0,
+    ) -> list[str]:
+        """Remove state files left by dead workers or stopped instances.
+
+        A worker whose recorded pid is dead is always cleaned.  A *live* worker
+        is only stopped when *is_running* explicitly returns ``False`` for its
+        instance (never when it returns ``True`` or ``None``/unknown) and its
+        state file is at least *min_age_s* old, so a concurrent ``instances
+        start`` cannot lose the worker it just spawned.  Returns the cleaned
+        instance names for the caller to report.
+        """
+        cleaned: list[str] = []
+        now = time.time()
+        for path in state_files(self._paths):
+            data = read_state(path)
+            if data is None:
+                continue
+            instance = str(data.get("instance") or "")
+            if not instance:
+                continue
+            try:
+                pid = int(data.get("pid") or 0)
+            except (TypeError, ValueError):
+                pid = 0
+            if not _pid_alive(pid):
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                try:
+                    stop_file_for(path).unlink()
+                except OSError:
+                    pass
+                cleaned.append(instance)
+                continue
+            if is_running is None:
+                continue
+            try:
+                running = is_running(instance)
+            except Exception:  # noqa: BLE001 - an unreadable instance is unknown
+                running = None
+            if running is not False:
+                continue
+            created_at = data.get("created_at")
+            age = now - created_at if isinstance(created_at, (int, float)) else float("inf")
+            if age < min_age_s:
+                continue
+            self.stop(instance)
+            cleaned.append(instance)
+        return cleaned
+
     def close(self) -> None:
         """Detach without stopping anything.
 
@@ -400,15 +511,22 @@ class DetachedBridgeManager:
         self._spawned.clear()
 
     # -- internals -------------------------------------------------------
-    def _terminate(self, instance: str) -> None:
-        data = read_state(self._state_file(instance))
+    def _terminate(
+        self,
+        instance: str,
+        *,
+        state_file: Path | None = None,
+        pid: int = 0,
+    ) -> None:
+        path = state_file or self._state_file(instance)
         process = self._spawned.pop(instance, None)
-        pid = 0
-        if data is not None:
-            try:
-                pid = int(data.get("pid") or 0)
-            except (TypeError, ValueError):
-                pid = 0
+        if not pid:
+            data = read_state(path)
+            if data is not None:
+                try:
+                    pid = int(data.get("pid") or 0)
+                except (TypeError, ValueError):
+                    pid = 0
         if callable(getattr(process, "poll", None)) and process.poll() is None:
             try:
                 process.kill()
@@ -444,4 +562,9 @@ def _validate_instance(instance: str) -> str:
     return instance
 
 
-__all__ = ["DEFAULT_READY_TIMEOUT_S", "DetachedBridgeManager"]
+__all__ = [
+    "DEFAULT_ORPHAN_MIN_AGE_S",
+    "DEFAULT_READY_TIMEOUT_S",
+    "DetachedBridgeManager",
+    "pid_alive",
+]

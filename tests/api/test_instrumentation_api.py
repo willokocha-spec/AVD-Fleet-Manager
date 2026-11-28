@@ -218,7 +218,10 @@ def downloads() -> ScriptedDownload:
 
 @pytest.fixture()
 def service(
-    repository: InstrumentationRepository, tmp_path: Path, downloads: ScriptedDownload
+    repository: InstrumentationRepository,
+    store: Store,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
 ) -> InstrumentationService:
     running = {"avd-01": True, "avd-02": True, "avd-stopped": False}
 
@@ -240,6 +243,7 @@ def service(
         DeviceProber(runner=_magisk_device()),
         resolve,
         acquisition=AcquisitionStore(tmp_path / "toolchain", http_get=downloads),
+        settings=store.settings,
     )
 
 
@@ -635,6 +639,65 @@ def test_builtin_profile_can_be_cloned_into_an_editable_copy(client: TestClient)
 
     missing = client.post("/api/v1/instrumentation/profiles/prof_missing/clone", headers=headers)
     assert missing.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle automation binding
+# ---------------------------------------------------------------------------
+AUTO_PATH = "/api/v1/instrumentation/instances/avd-01/auto-profile"
+
+
+def test_auto_profile_bind_read_and_clear(client: TestClient) -> None:
+    headers = auth_headers()
+
+    empty = client.get(AUTO_PATH, headers=headers)
+    assert empty.status_code == 200
+    assert empty.json() == {"instance": "avd-01", "profile_id": ""}
+
+    bound = client.put(AUTO_PATH, json={"profile_id": "prof_builtin_root"}, headers=headers)
+    assert bound.status_code == 200, bound.text
+    assert bound.json() == {"instance": "avd-01", "profile_id": "prof_builtin_root"}
+
+    fetched = client.get(AUTO_PATH, headers=headers)
+    assert fetched.json() == {"instance": "avd-01", "profile_id": "prof_builtin_root"}
+
+    cleared = client.put(AUTO_PATH, json={"profile_id": ""}, headers=headers)
+    assert cleared.status_code == 200
+    assert cleared.json() == {"instance": "avd-01", "profile_id": ""}
+    assert client.get(AUTO_PATH, headers=headers).json()["profile_id"] == ""
+
+
+def test_auto_profile_rejects_an_unknown_profile(client: TestClient) -> None:
+    headers = auth_headers()
+
+    response = client.put(
+        AUTO_PATH, json={"profile_id": "prof_does_not_exist"}, headers=headers
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    # Nothing was bound by the failed request.
+    assert client.get(AUTO_PATH, headers=headers).json()["profile_id"] == ""
+
+
+def test_deleting_a_profile_clears_its_auto_profile_binding(client: TestClient) -> None:
+    headers = auth_headers()
+    created = client.post(
+        "/api/v1/instrumentation/profiles",
+        json={"name": "Bound then deleted", "steps": [{"action": "verify_root"}]},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    profile_id = created.json()["id"]
+
+    bound = client.put(AUTO_PATH, json={"profile_id": profile_id}, headers=headers)
+    assert bound.json()["profile_id"] == profile_id
+
+    assert client.delete(f"/api/v1/instrumentation/profiles/{profile_id}", headers=headers).status_code == 204
+
+    binding = client.get(AUTO_PATH, headers=headers)
+    assert binding.status_code == 200
+    assert binding.json() == {"instance": "avd-01", "profile_id": ""}
 
 
 # ---------------------------------------------------------------------------

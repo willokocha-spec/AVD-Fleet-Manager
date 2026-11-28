@@ -109,10 +109,12 @@ behaviours below are the result; they are enforced by those tests:
   resolver does not supply one, so the API 27 guard actually fires.
 - **`PUT /profiles/{id}` returns 404** for an unknown id instead of creating it, and
   renaming to an existing name returns 409.
-- **Auto-start is once per boot.** The profile is queued from `wait-boot` only (the
-  `start` call returns before the device is booted), a duplicate is skipped while a
-  run for that instance and profile is queued/running, `dry_run` starts queue
-  nothing, and deleting a profile clears its bindings.
+- **Auto-start runs once per boot from one trigger point.** The runtime's
+  boot-completed hook queues the bound profile when `wait-boot` observes the
+  device booted, and the kernel boot identity is claimed atomically in the
+  database; a second `wait-boot` for the same boot queues nothing. `start` never
+  queues (it returns before boot), `dry_run` queues nothing, and deleting a
+  profile clears its bindings.
 - **Provenance is redacted.** `import_url` strips userinfo and query values before
   storing `source_url`, and a redirect that downgrades an https acquisition to plain
   http is refused before any bytes are stored.
@@ -121,7 +123,7 @@ behaviours below are the result; they are enforced by those tests:
 
 ### Lifecycle automation
 
-An AVD can be bound to a profile that runs automatically when it starts:
+An AVD can be bound to a profile that runs automatically once it has booted:
 
 ```bash
 curl -X PUT "$API/instrumentation/instances/Device_4/auto-profile" \
@@ -131,11 +133,28 @@ curl -X PUT "$API/instrumentation/instances/Device_4/auto-profile" \
 
 `GET` the same path returns the binding; an empty `profile_id` clears it. The
 binding is stored in the `settings` table (`instrumentation.auto_profiles`) and
-survives daemon restarts. Both `POST /instances/{name}/start` and
-`POST /instances/{name}/wait-boot` queue the configured profile on a worker
-thread after the call succeeds, so a slow deployment never delays the start
-response. Automation is best-effort by design: a missing profile, a stopped AVD
-or a failing step is logged and never fails the instance start.
+survives daemon restarts.
+
+The trigger is a single boot-completed hook on the runtime service. Every
+`wait-boot` that observes the device booted invokes it: the HTTP
+`POST /instances/{name}/wait-boot` route, `avdfleet instances wait-boot`, and a
+repeated wait on an already-booted instance all reach the same hook.
+`POST /instances/{name}/start` never queues anything, because it returns as soon
+as the emulator process is spawned, before the guest has booted.
+
+Each trigger is claimed once per boot in `instrumentation_auto_runs`, whose
+primary key is `(instance, profile_id, boot_id)`. The `boot_id` is
+`ro.boot.serialno` plus `/proc/sys/kernel/random/boot_id` read through `adb`
+(available on API 25 and API 34 alike). `INSERT OR IGNORE` makes the claim
+atomic, so a second `wait-boot` for the same boot queues nothing and two
+concurrent triggers still create exactly one run. The run is queued inline and
+executed on a worker thread, so a slow deployment never delays the `wait-boot`
+response. Because the key changes with every guest boot, restarting the AVD
+triggers the profile again; a daemon restart alone does not.
+
+Automation is best-effort by design: a missing profile, an unreadable boot id,
+a stopped AVD or a failing step is logged and never fails the instance start.
+Deleting a profile clears the bindings that point at it.
 
 To verify components after a reboot rather than install anything, bind a
 verify-only profile (for example `Root`, or a custom profile whose single step is

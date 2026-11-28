@@ -12,7 +12,10 @@ this module are reused by :mod:`avdfleet.cli.commands.gui`, so ``avdfleet gui``
 starts exactly the same daemon as ``avdfleet serve``.
 """
 
+import copy
 import ipaddress
+import logging
+import re
 import threading
 import webbrowser
 from pathlib import Path
@@ -21,6 +24,7 @@ from typing import Any
 import typer
 
 from avdfleet.core.config import APP_VERSION, Config
+from avdfleet.core.logging import RedactingFilter
 
 from ..context import get_context
 from ..errors import CliUsageError, command_errors
@@ -119,7 +123,9 @@ def resolve_security_allowlists(
                 hint="pass --trusted-host <name-or-ip> (repeatable) so Host-header "
                 "validation and the browser Origin allowlist are explicit",
             )
-        origin_hosts = [*explicit_non_loopback]
+        # A wildcard bind is usually reached through loopback in a browser on the
+        # same machine; without this the GUI WebSocket gets 403 on a non-default port.
+        origin_hosts = [*explicit_non_loopback, "127.0.0.1", "localhost"]
     else:
         hosts.append(bind_host)
         origin_hosts = [bind_host]
@@ -162,6 +168,60 @@ def create_daemon_app(config: Config, container: Any, paths: Any) -> Any:
     return create_app(config=config, container=container, paths=paths)
 
 
+#: Query-string credentials that must never reach a log sink.  The shared
+#: ``RedactingFilter`` already masks ``?token=``; uvicorn also logs the raw
+#: WebSocket request line, including the single-use ``?ticket=`` used by the GUI.
+_WS_QUERY_SECRET = re.compile(r"(?i)([?&](?:ticket|token)=)[^&\s\"']+")
+
+
+class UvicornRedactionFilter(logging.Filter):
+    """Scrub daemon credentials from uvicorn's own log output.
+
+    uvicorn writes the WebSocket request line at INFO on ``uvicorn.error`` even
+    with ``access_log=False``, and that line carries the full query string.  This
+    filter wraps the project's :class:`~avdfleet.core.logging.RedactingFilter`
+    (tokens, passwords, authorization headers, …) and additionally masks
+    ``?ticket=``/``?token=`` values.
+    """
+
+    def __init__(self, name: str = "") -> None:
+        super().__init__(name)
+        self._shared = RedactingFilter()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._shared.filter(record):
+            return False
+        try:
+            message = record.getMessage()
+            scrubbed = _WS_QUERY_SECRET.sub(r"\1***", message)
+            if scrubbed != message:
+                record.msg = scrubbed
+                record.args = None
+        except Exception:  # pragma: no cover - logging must never raise
+            record.msg = "<log message redaction failed>"
+            record.args = None
+        return True
+
+
+def uvicorn_log_config() -> dict[str, Any]:
+    """Return uvicorn's logging config with the daemon redaction filter attached.
+
+    The filter travels inside the config uvicorn applies while starting the
+    server, so it is active before the first log line is written and is never
+    installed at import time.
+    """
+    from uvicorn.config import LOGGING_CONFIG  # noqa: PLC0415 - imported when the server runs
+
+    config: dict[str, Any] = copy.deepcopy(LOGGING_CONFIG)
+    filters = config.setdefault("filters", {})
+    filters["avdfleet_redact"] = {
+        "()": "avdfleet.cli.commands.serve.UvicornRedactionFilter",
+    }
+    for handler in config.get("handlers", {}).values():
+        handler.setdefault("filters", []).append("avdfleet_redact")
+    return config
+
+
 def run_uvicorn(
     app: Any,
     *,
@@ -179,6 +239,9 @@ def run_uvicorn(
         "port": port,
         "log_level": "info",
         "access_log": access_log,
+        # Redact credentials (token/ticket) before anything reaches a handler,
+        # including uvicorn.error's WebSocket request line.
+        "log_config": uvicorn_log_config(),
     }
     if tls_cert is not None:
         kwargs["ssl_certfile"] = str(tls_cert)
@@ -341,6 +404,7 @@ def register(app: typer.Typer) -> None:
 
 
 __all__ = [
+    "UvicornRedactionFilter",
     "create_daemon_app",
     "display_url",
     "is_loopback_host",
@@ -349,4 +413,5 @@ __all__ = [
     "resolve_security_allowlists",
     "run_uvicorn",
     "serve",
+    "uvicorn_log_config",
 ]

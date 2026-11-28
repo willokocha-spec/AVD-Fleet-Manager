@@ -7,6 +7,7 @@ handle and the same encoding helpers as every other repository.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from ..core.errors import ConflictError, NotFoundError
@@ -323,6 +324,36 @@ class InstrumentationRepository:
             raise ConflictError(f"profile {profile.name!r} is built in and cannot be deleted")
         with self._db.transaction() as conn:
             conn.execute("DELETE FROM instrumentation_profiles WHERE id = ?", (profile_id,))
+
+    # -- lifecycle automation --------------------------------------------
+    def claim_auto_run(self, instance: str, profile_id: str, boot_id: str) -> str | None:
+        """Reserve one (instance, profile, boot) trigger and return its run id.
+
+        Uniqueness is enforced here, by the composite primary key, rather than by
+        a Python "has it run yet?" check: two concurrent triggers both execute
+        the insert, but SQLite applies one and reports zero affected rows for the
+        other.  The reservation stores the run id it authorises, so the row also
+        records which boot a run belongs to.
+        """
+        run_id = f"irun_{uuid.uuid4().hex[:12]}"
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO instrumentation_auto_runs"
+                " (instance, profile_id, boot_id, run_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (instance, profile_id, boot_id, run_id, encode_datetime(utcnow())),
+            )
+            claimed = cursor.rowcount > 0
+        return run_id if claimed else None
+
+    def release_auto_run(self, instance: str, profile_id: str, boot_id: str) -> None:
+        """Undo a claim whose run could not be created, so the boot is not lost."""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "DELETE FROM instrumentation_auto_runs"
+                " WHERE instance = ? AND profile_id = ? AND boot_id = ?",
+                (instance, profile_id, boot_id),
+            )
 
     # -- runs + logs -----------------------------------------------------
     def create_run(self, run: DeploymentRun) -> DeploymentRun:

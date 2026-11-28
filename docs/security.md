@@ -26,16 +26,27 @@ machine.
 - Bearer token generated with `secrets.token_urlsafe(32)`, stored in
   `<data>/token` with owner-only permissions (`0600`; Windows ACL via `icacls` best
   effort). `AVDFLEET_TOKEN` can override for tests/containers.
-- Constant-time comparison. Missing/invalid token → 401 with the standard error envelope;
-  no token is ever echoed or logged.
+- Constant-time comparison. Missing/invalid token → 401 with the standard error envelope.
+- The token is never written to daemon output: the GUI authenticates its WebSockets with a
+  **single-use ticket** (`POST /api/v1/auth/ws-ticket`, burned on first use), and uvicorn's
+  `error`/`access` loggers carry a redaction filter so a legacy `?token=` URL cannot reach a
+  log record either.
 - `GET /health` is unauthenticated but exposes only status/version.
 - CORS is an explicit allowlist of GUI origins; `TrustedHostMiddleware` limits Host
   headers. Browsers cannot use the API without the token, which cross-origin JS cannot
   read from the local filesystem.
-- WebSocket `/ws/events` and `/ws/instances/{name}/screen` require the token (query or
-  header) **and** an allowed `Origin`; missing token/origin closes with 1008. Screen frames
-  are per-instance and never include shell credentials.
+- WebSocket `/ws/events` and `/ws/instances/{name}/screen` require authentication **and** an
+  allowed `Origin`; missing credentials or origin closes with 1008. Browsers present a
+  single-use ticket (`?ticket=`), CLI clients send `Authorization: Bearer`; the legacy
+  `?token=` query parameter still works but is deprecated and redacted from logs. Screen
+  frames are per-instance and never include shell credentials.
 - `avdfleet gui` can open a **one-time sign-in link** instead of asking for the token.
+- Emulator logs contain the per-instance listener URL (an `http_proxy` with its token), so on
+  POSIX they are created `0600` inside a `0700` directory; the data directory ACL covers
+  them on Windows.
+- Acquiring a pinned artifact from a URL refuses an **https → http** downgrade before the
+  insecure request is sent, refuses redirects to loopback, link-local, private and reserved
+  addresses, and never prints a URL's query string in an error.
   It requests a short-lived, single-use code over the authenticated loopback API, then
   opens `/auth/bootstrap#code=...`. The code stays in the URL fragment (never sent to the
   server or written to logs), is consumed on first redemption, and is exchanged for the

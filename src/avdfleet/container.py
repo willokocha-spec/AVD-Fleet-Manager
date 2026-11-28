@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -103,12 +104,20 @@ class Container:
         # after spawning the emulator, so it needs the detached per-instance
         # worker (``detached_bridge=True``).  The daemon and the test suite are
         # long-lived owners: an in-process bridge is correct for them, cheaper,
-        # and observable.
-        self.bridge_service = (
-            DetachedBridgeManager(config, paths)
-            if detached_bridge
-            else BridgeManager(config, port_allocator=self.port_allocator)
-        )
+        # and observable.  The daemon additionally receives a detached manager so
+        # it can see and stop workers spawned by a one-shot CLI invocation.
+        self._detached_bridges: Any | None = None
+        self._bridge_runtime_state: Any | None = None
+        self.bridge_service: Any
+        if detached_bridge:
+            self.bridge_service = DetachedBridgeManager(config, paths)
+        else:
+            self._detached_bridges = DetachedBridgeManager(config, paths)
+            self.bridge_service = BridgeManager(
+                config,
+                port_allocator=self.port_allocator,
+                detached=self._detached_bridges,
+            )
         self.verifier_service = GuestEgressVerifier(
             config,
             adb_path=[str(self.adb_path)] if self.adb_path else None,
@@ -224,13 +233,19 @@ class Container:
             python_version=self.host_info.python_version if self.host_info else "",
         )
 
+        # Detached proxy workers outlive the CLI that spawned them.  A state file
+        # whose worker died with its instance, or whose instance is no longer
+        # running, must not confuse a later start/stop (or keep a listener alive
+        # for an emulator that is gone).
+        self._cleanup_detached_bridges()
+
     # ------------------------------------------------------------------
     # lazily constructed runtime-dependent services
     # ------------------------------------------------------------------
     def _build_runtime(self) -> Any:
         from .platform.runtime import RuntimeManagerService
 
-        return RuntimeManagerService(
+        runtime = RuntimeManagerService(
             self.avds_service,
             backend=self.sdk,
             config=self.config,
@@ -242,6 +257,37 @@ class Container:
             bridge=self.bridge_service,
             direct_proxy_enabled=False,
         )
+        # Boot-time automation has exactly one trigger point: the runtime's
+        # boot-completed hook.  It therefore covers the HTTP wait-boot route, the
+        # CLI's direct wait_boot call and a repeated wait on a booted instance.
+        runtime.on_boot_completed(self._apply_auto_profile)
+        return runtime
+
+    def _apply_auto_profile(self, name: str) -> None:
+        """Queue (and run) the instrumentation profile bound to *instance*.
+
+        The hook runs inside ``wait_boot``; a broken profile or a slow deployment
+        must never fail the boot wait, so every failure is logged and swallowed
+        and the deployment itself runs on a daemon thread after it is queued.
+        """
+        try:
+            service = self.instrumentation
+            run = service.try_auto_profile(name)
+        except Exception:  # noqa: BLE001 - automation must not break instance start
+            logger.exception("auto instrumentation profile for %s could not be queued", name)
+            return
+        if run is None:
+            return
+
+        def execute() -> None:
+            try:
+                service.execute_run(run.id)
+            except Exception:  # noqa: BLE001 - background run failures are logged
+                logger.exception("auto instrumentation run %s crashed", run.id)
+
+        threading.Thread(
+            target=execute, name=f"avdfleet-auto-{run.id}", daemon=True
+        ).start()
 
     def runtime(self) -> Any:
         if self._runtime_service is None:
@@ -322,10 +368,77 @@ class Container:
         return f"emulator-{name}"
 
     # ------------------------------------------------------------------
+    # detached proxy bridge workers (out-of-process)
+    # ------------------------------------------------------------------
+    def _detached_cleaner(self) -> Any | None:
+        for name in ("cleanup_detached", "cleanup_orphans"):
+            candidate = getattr(self.bridge_service, name, None)
+            if callable(candidate):
+                return candidate
+        return None
+
+    def _bridge_instance_running(self, instance: str) -> bool | None:
+        """Whether *instance*'s emulator is running, from persisted runtime state.
+
+        ``None`` means "unknown"; cleanup then leaves a live worker alone.  This
+        deliberately does not construct the full runtime service (it is lazy for
+        a reason) and never guesses from a missing record.
+        """
+        try:
+            from .platform.runtime.manager import RuntimeStateStore
+            from .proxy.bridge.detached import pid_alive
+
+            state = self._bridge_runtime_state
+            if state is None:
+                state = RuntimeStateStore(self.store, self.paths)
+                self._bridge_runtime_state = state
+            info = state.load(instance)
+        except Exception:  # noqa: BLE001 - an unreadable state is unknown
+            return None
+        if info is None:
+            return None
+        if not bool(getattr(getattr(info, "state", None), "active", False)):
+            return False
+        pid = getattr(info, "pid", None)
+        if pid is None:
+            return None
+        try:
+            return pid_alive(int(pid))
+        except (TypeError, ValueError):
+            return None
+
+    def _cleanup_detached_bridges(self, *, min_age_s: float | None = None) -> list[str] | None:
+        """Clean detached workers whose pid died or whose instance stopped.
+
+        Returns the cleaned instance names, or ``None`` when no detached-worker
+        capability is wired or cleanup could not run.
+        """
+        cleaner = self._detached_cleaner()
+        if cleaner is None:
+            return None
+        if min_age_s is None:
+            from .proxy.bridge.detached import DEFAULT_ORPHAN_MIN_AGE_S
+
+            min_age_s = DEFAULT_ORPHAN_MIN_AGE_S
+        try:
+            cleaned = cleaner(self._bridge_instance_running, min_age_s=min_age_s)
+        except Exception as exc:  # noqa: BLE001 - cleanup must never block startup
+            logger.warning("detached bridge cleanup failed: %s", exc)
+            return None
+        names = [str(name) for name in cleaned or []]
+        if names:
+            logger.info(
+                "cleaned %d orphaned detached bridge state file(s): %s",
+                len(names),
+                ", ".join(names),
+            )
+        return names
+
+    # ------------------------------------------------------------------
     # ServiceContainer API
     # ------------------------------------------------------------------
     def doctor(self) -> Any:
-        return self.platform.doctor
+        return _BridgeAwareDoctor(self.platform.doctor, self)
 
     def host(self) -> Any:
         return self.platform
@@ -484,6 +597,75 @@ class Container:
             f"Container(edition={self.config.edition!r}, db={str(self.store.db_path)!r}, "
             f"backend={getattr(self.sdk, 'name', None)!r})"
         )
+
+
+class _BridgeAwareDoctor:
+    """Doctor facade that also reports detached proxy-bridge housekeeping.
+
+    The platform doctor owns its fixed check list; detached workers are a
+    cross-process concern of this container, so their cleanup is appended here
+    (only when a detached-worker manager is actually wired).
+    """
+
+    def __init__(self, inner: Any, container: Container) -> None:
+        self._inner = inner
+        self._container = container
+
+    def run(self, *, include_slow: bool = False) -> Any:
+        cleaned = self._container._cleanup_detached_bridges()
+        report = self._inner.run(include_slow=include_slow)
+        return _with_bridge_check(report, cleaned)
+
+    def fix(self, check_id: str, **kwargs: Any) -> Any:
+        return self._inner.fix(check_id, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _doctor_summary(checks: list[Any]) -> str:
+    from .core.models import CheckStatus
+
+    counts = {status: 0 for status in CheckStatus}
+    for check in checks:
+        status = getattr(check, "status", None)
+        if status in counts:
+            counts[status] += 1
+    ok = counts[CheckStatus.OK]
+    warn = counts[CheckStatus.WARN]
+    fail = counts[CheckStatus.FAIL]
+    skip = counts[CheckStatus.SKIP]
+    parts = f"{ok} ok, {warn} warning(s), {fail} failed, {skip} skipped"
+    if fail:
+        return f"{fail} critical issue(s) found: {parts}"
+    if warn:
+        return f"All critical checks passed with {warn} warning(s): {parts}"
+    return f"All checks passed: {parts}"
+
+
+def _with_bridge_check(report: Any, cleaned: list[str] | None) -> Any:
+    if cleaned is None:
+        return report
+    from .core.models import CheckStatus, DoctorCheck
+
+    if cleaned:
+        detail = (
+            f"cleaned {len(cleaned)} orphaned detached bridge state file(s): "
+            + ", ".join(sorted(cleaned))
+        )
+    else:
+        detail = "no orphaned detached bridge state files"
+    check = DoctorCheck(
+        id="bridge_workers",
+        title="Detached proxy bridge workers",
+        status=CheckStatus.OK,
+        detail=detail,
+    )
+    checks = [*list(getattr(report, "checks", []) or []), check]
+    try:
+        return report.model_copy(update={"checks": checks, "summary": _doctor_summary(checks)})
+    except AttributeError:  # pragma: no cover - duck-typed report
+        return report
 
 
 def _persist_config_values(path: Path, values: dict[str, Any]) -> None:

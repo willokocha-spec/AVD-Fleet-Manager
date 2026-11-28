@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import re
-import threading
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Query, Response
@@ -123,31 +122,6 @@ class CapacityInfoView(BaseModel):
 # ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
-
-def _launch_auto_profile(container: ContainerAdapter, name: str) -> None:
-    """Start the AVD's configured instrumentation profile in the background.
-
-    Best-effort by design: a broken profile must never fail an instance start, so
-    every failure here is logged and swallowed.
-    """
-    service = container.raw_service("instrumentation")
-    if service is None:
-        return
-    try:
-        run = service.try_auto_profile(name)
-    except Exception:  # noqa: BLE001 - automation must not break the start route
-        logger.exception("auto instrumentation profile for %s could not be queued", name)
-        return
-    if run is None:
-        return
-
-    def execute() -> None:
-        try:
-            service.execute_run(run.id)
-        except Exception:  # noqa: BLE001 - background run failures are logged
-            logger.exception("auto instrumentation run %s crashed", run.id)
-
-    threading.Thread(target=execute, name=f"avdfleet-auto-{run.id}", daemon=True).start()
 
 
 router = APIRouter(
@@ -465,9 +439,9 @@ def wait_boot(
     payload: Annotated[WaitBootRequest | None, Body()] = None,
 ) -> AvdInfo:
     body = payload or WaitBootRequest()
-    info = container.runtime().wait_boot(name, timeout_s=body.timeout_s)
-    _launch_auto_profile(container, name)
-    return info
+    # Boot-time automation is triggered by the runtime's boot-completed hook, so
+    # every entry point (this route, the CLI, the GUI) reaches it exactly once.
+    return container.runtime().wait_boot(name, timeout_s=body.timeout_s)
 
 
 @router.post(
