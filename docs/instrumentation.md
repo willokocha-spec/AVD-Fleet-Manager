@@ -109,12 +109,12 @@ behaviours below are the result; they are enforced by those tests:
   resolver does not supply one, so the API 27 guard actually fires.
 - **`PUT /profiles/{id}` returns 404** for an unknown id instead of creating it, and
   renaming to an existing name returns 409.
-- **Auto-start runs once per boot from one trigger point.** The runtime's
-  boot-completed hook queues the bound profile when `wait-boot` observes the
-  device booted, and the kernel boot identity is claimed atomically in the
-  database; a second `wait-boot` for the same boot queues nothing. `start` never
-  queues (it returns before boot), `dry_run` queues nothing, and deleting a
-  profile clears its bindings.
+- **Auto-start runs once per boot, from every start path.** A non-dry-run
+  `start` arms a background boot observer, and `wait-boot` uses the same boot
+  detection; both reach one boot-completed hook, and the kernel boot identity is
+  claimed atomically in the database, so the two paths together still produce
+  exactly one run. A second `wait-boot` on the same boot queues nothing,
+  `dry_run` queues nothing, and deleting a profile clears its bindings.
 - **Provenance is redacted.** `import_url` strips userinfo and query values before
   storing `source_url`, and a redirect that downgrades an https acquisition to plain
   http is refused before any bytes are stored.
@@ -135,22 +135,37 @@ curl -X PUT "$API/instrumentation/instances/Device_4/auto-profile" \
 binding is stored in the `settings` table (`instrumentation.auto_profiles`) and
 survives daemon restarts.
 
-The trigger is a single boot-completed hook on the runtime service. Every
-`wait-boot` that observes the device booted invokes it: the HTTP
-`POST /instances/{name}/wait-boot` route, `avdfleet instances wait-boot`, and a
-repeated wait on an already-booted instance all reach the same hook.
-`POST /instances/{name}/start` never queues anything, because it returns as soon
-as the emulator process is spawned, before the guest has booted.
+The trigger is a single boot-completed hook on the runtime service. Two observers
+reach it:
 
-Each trigger is claimed once per boot in `instrumentation_auto_runs`, whose
-primary key is `(instance, profile_id, boot_id)`. The `boot_id` is
+- A successful **non-dry-run** `POST /instances/{name}/start` (the GUI's
+  `startInstance`, and `avdfleet instances start`) arms a background boot
+  observer for that instance. It reuses the same probe as `wait-boot`
+  (`sys.boot_completed` plus a package-manager answer), marks the instance running
+  and invokes the hook once the guest has booted. `start` keeps returning as soon
+  as the emulator process is spawned; the observation happens on the daemon
+  thread, so a caller that never waits still applies a bound profile.
+- `POST /instances/{name}/wait-boot`, `avdfleet instances wait-boot`, and a
+  repeated wait on an already-booted instance also invoke the hook.
+
+Both observers can reach the hook for the same boot (for example a `start`
+immediately followed by a `wait-boot`). That is harmless, and deliberate: each
+trigger is claimed once per boot in `instrumentation_auto_runs`, whose primary
+key is `(instance, profile_id, boot_id)`. The `boot_id` is
 `ro.boot.serialno` plus `/proc/sys/kernel/random/boot_id` read through `adb`
 (available on API 25 and API 34 alike). `INSERT OR IGNORE` makes the claim
-atomic, so a second `wait-boot` for the same boot queues nothing and two
+atomic, so the second observation for the same boot queues nothing and two
 concurrent triggers still create exactly one run. The run is queued inline and
-executed on a worker thread, so a slow deployment never delays the `wait-boot`
-response. Because the key changes with every guest boot, restarting the AVD
-triggers the profile again; a daemon restart alone does not.
+executed on a worker thread, so a slow deployment never delays a start or a
+`wait-boot` response. Because the key changes with every guest boot, restarting
+the AVD triggers the profile again; a daemon restart alone does not.
+
+The observer is cancelled by `stop`, by the emulator process exiting, and by
+daemon shutdown, so it never keeps polling (or fires the hook) after an instance
+is gone. `dry_run` spawns nothing and therefore arms no observer. A boot that
+does not complete within `boot_timeout_s` is logged by the observer and not
+retried: automation is best effort and never turns a successful start into a
+failure.
 
 Automation is best-effort by design: a missing profile, an unreadable boot id,
 a stopped AVD or a failing step is logged and never fails the instance start.

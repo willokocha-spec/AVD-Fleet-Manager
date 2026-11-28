@@ -214,19 +214,32 @@ class DeviceProber:
         debuggable = (props.get("ro.debuggable", "") or "").strip()
         return build_type == "userdebug" or debuggable == "1"
 
-    def magisk_state(self, serial: str) -> tuple[bool, str, bool, list[str]]:
-        """Return ``(installed, version, environment_ready, notes)``."""
+    def magisk_state(
+        self, serial: str, *, adbd_root_fallback: bool = False
+    ) -> tuple[bool, str, bool, list[str]]:
+        """Return ``(installed, version, environment_ready, notes)``.
+
+        ``adbd_root_fallback`` is set only after magiskd has already been observed
+        through adbd root (shell ``su`` is denied, e.g. until the Magisk app
+        re-grants it). Without it these queries keep using the shell's ``su``.
+        """
         notes: list[str] = []
-        version_result = self.shell(serial, 'su -c "magisk -V"')
+
+        def query(command: str) -> CommandResult:
+            if adbd_root_fallback:
+                return self.root_shell(serial, command, magisk=True)
+            return self.shell(serial, f'su -c "{_escape(command)}"')
+
+        version_result = query("magisk -V")
         version = version_result.text().splitlines()[-1].strip() if version_result.ok else ""
         if not version:
-            verify = self.shell(serial, 'su -c "magisk -v"')
+            verify = query("magisk -v")
             if verify.ok and verify.text():
                 version = verify.text().splitlines()[-1].strip()
         installed = bool(version)
         ready = False
         if installed:
-            listing = self.shell(serial, 'su -c "ls /data/adb/magisk"')
+            listing = query("ls /data/adb/magisk")
             entries = [line for line in listing.stdout.splitlines() if line.strip()]
             ready = listing.ok and bool(entries)
             if not ready:
@@ -438,6 +451,7 @@ class DeviceProber:
             blockers.append("device is not running; start the instance to probe it")
 
         root = RootImplementation.NONE
+        magisk_via_adbd_root = False
         if running:
             root_probe = self.shell(serial, 'su -c id')
             probe_text = root_probe.text() if root_probe.ok else ""
@@ -447,6 +461,12 @@ class DeviceProber:
             if "uid=0" in probe_text and "u:r:magisk:s0" in probe_text:
                 root = RootImplementation.MAGISK
                 flags.magisk = True
+            elif self._magisk_payload_present(serial):
+                # Shell su is denied (Magisk withdraws the grant after a reboot)
+                # while magiskd still answers through adbd root. That is Magisk
+                # root: a plain adb-rooted image has no magiskd to answer at all.
+                root = RootImplementation.MAGISK
+                magisk_via_adbd_root = True
             elif self.adb_root_available(props) or not props:
                 if self._allow_adb_root:
                     root_result = self.run(serial, "root")
@@ -458,8 +478,16 @@ class DeviceProber:
 
         xposed_inventory: list[InstalledModule] = []
         if running and root is not RootImplementation.NONE:
-            installed, version, ready, magisk_notes = self.magisk_state(serial) if root is RootImplementation.MAGISK else (False, "", False, [])
+            installed, version, ready, magisk_notes = (
+                self.magisk_state(serial, adbd_root_fallback=magisk_via_adbd_root)
+                if root is RootImplementation.MAGISK
+                else (False, "", False, [])
+            )
             if root is RootImplementation.MAGISK:
+                if magisk_via_adbd_root:
+                    # The payload already answered through adbd root; a version
+                    # read that still fails must not downgrade the detection.
+                    installed = True
                 flags.magisk = installed
                 flags.magisk_version = version
                 flags.magisk_environment_ready = ready

@@ -152,7 +152,8 @@ keystore, imported as `mod_957a949008704781`).
 | unregistered package (`com.example.missing`) | **verified** — `ok=False`, `state=unsupported` |
 | undotted name (`lspd`) | **verified** — `ok=False`, validation message `invalid Android package: 'lspd'` |
 
-Defects observed while verifying (not fixed here; `src/**` untouched by this pass):
+Defects observed while verifying (C1/C2/C4 dispositions recorded below; the
+`library.py` item was outside that pass):
 
 - `service.py:490-494` (`_execute_target`): with `continue_on_error=true`, a run
   whose **every** step failed still reports `result.ok=True` and the run state
@@ -160,23 +161,47 @@ Defects observed while verifying (not fixed here; `src/**` untouched by this pas
   `all(step.ok ...)` and the run should be `failed`/`partial`. Failing test:
   a two-step profile with `continue_on_error` on both and two failing steps must
   not report `succeeded`.
+  **CLOSED — does not reproduce (C1).** `tests/unit/test_instrumentation.py::test_continue_on_error_where_every_step_failed_is_not_success`
+  (two failing `verify_root` steps, `continue_on_error: true`) passes without a
+  source change: the target result is `ok=False` and the run is `failed`; the
+  `failed_steps` accumulation in `_execute_target` already covers the all-failed
+  case.
 - `service.py:648-675` vs `:1026` (`complete_magisk_setup`): the post-setup wait
   never calls `Prober.forget_root()`, so an app-initiated reboot leaves a stale
   adbd-root cache and `ls /data/adb/magisk` then runs through a non-root shell.
   Observed: the step failed ("did not complete unattended") while
   `/data/adb/magisk` was in fact populated and `magisk -V` returned 26100; a
   fresh process reported "the Magisk environment is already complete".
-- `library.py:220-230`: an APK whose only Xposed marker is the manifest
-  `xposedmodule` meta-data imports as `unknown` (the module docstring says
-  manifest meta-data counts, the code only scans archive entries). LSPosed does
-  register such a module, so `install_module` would refuse it. Failing test:
-  import a meta-data-only APK and expect `ModuleKind.XPOSED_APK`.
+  **FIXED (C2).** `complete_magisk_setup` now calls
+  `self._prober.forget_root(target.serial)` when it observes the device leaving
+  boot (both the dialog loop and the post-setup wait), so the final
+  `ls /data/adb/magisk` goes through a fresh root path. Test:
+  `tests/unit/test_instrumentation.py::test_complete_magisk_setup_forgets_the_root_cache_after_the_app_reboot`
+  — scripted adb whose first `getprop sys.boot_completed` is `1`, then the device
+  disappears and returns booted; it asserts `forget_root` was called after the
+  reboot observation and that the final `/data/adb/magisk` check passed only
+  after a fresh `adb root`.
+- `library.py` meta-data-only APK: **CLOSED — does not reproduce.** A minimal APK
+  whose only marker is the manifest `xposedmodule` meta-data already imports as
+  `ModuleKind.XPOSED_APK` (with `metadata["xposed_meta_data"]`), and a marker-less
+  control still imports as `unknown`. Evidence:
+  `tests/unit/test_library_metadata.py` (the path landed in `9101648`).
 - `capabilities.py:432` (`probe`): Magisk is only detected when `su -c id`
   succeeds; on a device where shell `su` is denied the scan reports
   `root=adb_root`, `magisk=False` and no `xposed_modules`, even though `lspd`
   runs. Running `adb root` first makes the same call report `magisk`. Consider
   probing through `root_shell(..., magisk=True)` (which has the adbd-root
   fallback) instead of a bare `su -c id`.
+  **FIXED (C4).** `probe()` now calls `_magisk_payload_present()` between the
+  `su -c id` check and the `adb_root_available()` branch (the helper is gated by
+  `_allow_adb_root`), and `magisk_state()` accepts that same adbd-root fallback
+  for the follow-up version/environment queries. Tests:
+  `tests/unit/test_instrumentation.py::test_probe_detects_magisk_through_adbd_root_when_shell_su_is_denied`
+  (denied `su`, `magisk -V` through adbd root → `MAGISK`, `capabilities.magisk=True`);
+  `::test_probe_userdebug_device_does_not_adb_root_without_opt_in`
+  (`allow_adb_root=False` still reports `NONE` and never issues `adb root`);
+  `::test_probe_userdebug_device_without_su_reports_adb_root_only`
+  (a plain userdebug device with no Magisk still reports `ADB_ROOT`).
 
 ## Host note (doctor adb-transport check)
 

@@ -13,11 +13,21 @@ Lifecycle and guarantees:
   credential-free emulator argv, spawns a detached process, records
   pid/ports/start time, persists the state and emits
   ``instance.state`` events.  ``dry_run`` returns the plan without spawning.
+  A successful non-dry-run start also arms one daemon boot observer per
+  instance: it reuses the boot-wait probe, marks the instance ``running`` and
+  invokes the boot-completed hooks once the guest has booted, so a caller that
+  never calls ``wait_boot`` (the GUI's ``startInstance``, ``avdfleet instances
+  start``) still triggers boot automation.  The observer is cancelled by
+  ``stop``, by an observed process exit and by ``close`` (daemon shutdown) and
+  never holds up ``start``.
 * ``wait_boot`` polls ``sys.boot_completed`` *and* ``pm path android`` through
   ``adb`` with the configured timeout; on timeout it force-stops the instance,
   marks it ``error`` and raises :class:`BootTimeoutError`.  A successful wait
   (including one that observes an already-booted instance) invokes every
   registered boot-completed hook; hook failures are logged and swallowed.
+  When the background observer already reported the same boot, the hook may be
+  reached once more, which is why consumers claim a boot once (see
+  ``InstrumentationService.try_auto_profile``).
 * ``stop`` prefers the emulator console's graceful ``kill``, falls back to
   ``terminate`` then ``kill``, waits for the whole emulator process tree (the
   Windows launcher and its ``qemu-system-*`` child) to disappear, and only then
@@ -80,6 +90,7 @@ from .boot import (
     AdbRunner,
     BackendAdbRunner,
     BootDetector,
+    BootStatus,
     SubprocessAdbRunner,
     boot_serial,
 )
@@ -108,6 +119,13 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 RUNTIME_STATE_FILENAME = "runtime-state.json"
 RUNTIME_STATE_VERSION = "1"
 _ACTIVE_STATES = (InstanceState.STARTING, InstanceState.BOOTING, InstanceState.RUNNING)
+# A freshly spawned emulator cannot have booted yet, so the background observer
+# waits one poll interval before its first adb probe.  The floor keeps the first
+# probe out of the synchronous start path even when polling is configured
+# aggressively (or, in tests, not at all), and avoids a pointless adb round-trip
+# for a guest that has only just been powered on.
+_BOOT_WATCH_MIN_SETTLE_S = 1.0
+_BOOT_WATCH_MAX_SETTLE_S = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +464,14 @@ class RunningInstance:
         return self.state in _ACTIVE_STATES
 
 
+@dataclass
+class _BootWatch:
+    """One background boot observer armed by ``start`` for a running instance."""
+
+    cancel: threading.Event
+    thread: threading.Thread | None = None
+
+
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
@@ -510,6 +536,8 @@ class RuntimeManagerService:
         self._lock = threading.RLock()
         self._records: dict[str, RunningInstance] = {}
         self._boot_completed_hooks: list[Callable[[str], None]] = []
+        self._boot_watchers: dict[str, _BootWatch] = {}
+        self._closed = False
         self._state_store = RuntimeStateStore(store, self.paths)
         self._port_allocator = port_allocator or PortAllocator(
             start=int(self.config.port_range_start),
@@ -669,10 +697,12 @@ class RuntimeManagerService:
     def on_boot_completed(self, callback: Callable[[str], None]) -> None:
         """Register a callback invoked when an instance finishes booting.
 
-        This is the single trigger point for boot-time automation.  Every path
-        that observes boot completion goes through ``wait_boot`` (the HTTP
-        ``wait-boot`` route, the CLI, and a repeated wait on an instance that is
-        already booted), so callers do not each have to remember to fire it.
+        This is the single trigger point for boot-time automation.  Two paths
+        observe boot completion: the background observer armed by a successful
+        non-dry-run ``start`` (so callers that never wait are covered) and
+        ``wait_boot`` (the HTTP ``wait-boot`` route and the CLI).  A consumer
+        that must act exactly once per guest boot claims that boot itself, as
+        ``InstrumentationService.try_auto_profile`` does.
 
         The callback receives the instance name.  Hook failures are logged and
         swallowed: automation must never break an instance start or a boot wait.
@@ -690,6 +720,166 @@ class RuntimeManagerService:
                 hook(name)
             except Exception:  # noqa: BLE001 - one broken hook must not fail a boot
                 logger.exception("boot-completed hook for %s failed", name)
+
+    # -- background boot observation -----------------------------------
+    def _arm_boot_watch(self, record: RunningInstance) -> None:
+        """Start the per-instance boot observer for a freshly launched *record*.
+
+        The thread is created, published and started under the service lock so a
+        concurrent ``stop`` can never observe (and try to join) an unstarted
+        thread.  A failure to spawn the observer is logged, never raised: boot
+        automation is best effort and must not fail an instance start.
+        """
+        name = record.name
+        with self._lock:
+            if self._closed:
+                return
+            previous = self._boot_watchers.pop(name, None)
+            if previous is not None:  # defensive: an older observer must not linger
+                previous.cancel.set()
+            cancel = threading.Event()
+            watch = _BootWatch(cancel=cancel)
+            thread = threading.Thread(
+                target=self._run_boot_watch,
+                args=(record, cancel),
+                name=f"avdfleet-boot-{name}",
+                daemon=True,
+            )
+            watch.thread = thread
+            self._boot_watchers[name] = watch
+            try:
+                thread.start()
+            except Exception:  # noqa: BLE001 - automation must not fail the start
+                self._boot_watchers.pop(name, None)
+                logger.exception("could not start the boot observer for %s", name)
+
+    def _run_boot_watch(self, record: RunningInstance, cancel: threading.Event) -> None:
+        """Observe one instance's boot, then fire the boot-completed hooks once.
+
+        Reuses :class:`BootDetector` with the same probe, timeout and liveness
+        rules as ``wait_boot``.  The injected ``sleep`` is the observer's cancel
+        event, so ``stop``/``close`` interrupt the poll immediately instead of
+        waiting for the current poll interval to expire.
+        """
+        name = record.name
+        settle = max(
+            _BOOT_WATCH_MIN_SETTLE_S,
+            min(float(self._boot.poll_interval_s), _BOOT_WATCH_MAX_SETTLE_S),
+        )
+        try:
+            if cancel.wait(settle):
+                return
+
+            def _sleep(seconds: float) -> None:
+                cancel.wait(max(0.0, float(seconds)))
+
+            detector = BootDetector(
+                self._adb,
+                clock=self._clock,
+                sleep=_sleep,
+                poll_interval_s=self._boot.poll_interval_s,
+                shell_timeout_s=self._boot.shell_timeout_s,
+            )
+            status = detector.wait(
+                record.adb_serial or boot_serial(record.ports),
+                timeout_s=float(self.config.boot_timeout_s),
+                is_process_alive=lambda: self._poll(record) is None,
+                should_stop=lambda: cancel.is_set() or record.expected_stop,
+            )
+            if cancel.is_set() or record.expected_stop:
+                return
+            if not status.booted:
+                # Observing boot is best effort: a timeout or an exit is only
+                # logged, never a reason to fail an instance that already started.
+                if status.timed_out:
+                    logger.warning(
+                        "instance %s: background boot observation timed out after %.0fs; "
+                        "boot automation was not triggered",
+                        name,
+                        float(self.config.boot_timeout_s),
+                    )
+                else:
+                    logger.debug(
+                        "instance %s: background boot observation ended without boot (%s)",
+                        name,
+                        status.last_error or "process exited",
+                    )
+                return
+            self._complete_background_boot(record, status)
+        except Exception:  # noqa: BLE001 - the observer must never kill the daemon
+            logger.exception("background boot observer for %s failed", name)
+        finally:
+            with self._lock:
+                watch = self._boot_watchers.get(name)
+                if watch is not None and watch.cancel is cancel:
+                    self._boot_watchers.pop(name, None)
+
+    def _complete_background_boot(
+        self, record: RunningInstance, status: BootStatus
+    ) -> None:
+        """Publish one background boot observation and notify the hooks."""
+        name = record.name
+        with self._lock:
+            if self._closed:
+                return  # daemon shutdown: do not queue automation now
+            if self._records.get(name) is not record:
+                return  # stopped, replaced or restarted while the observer waited
+            if record.expected_stop or not record.active or record.boot_completed:
+                return  # a stop was requested, or wait_boot already reported it
+            record.boot_completed = True
+            record.state = InstanceState.RUNNING
+            record.error = ""
+            self._persist_record(record)
+        self._emit_state(
+            name,
+            InstanceState.RUNNING,
+            boot_completed=True,
+            boot_seconds=round(status.seconds, 3),
+        )
+        self._sink.emit(
+            EventType.INSTANCE_BOOT,
+            {
+                "instance": name,
+                "boot_seconds": round(status.seconds, 3),
+                "polls": status.polls,
+                "package_manager_ready": status.package_manager_ready,
+            },
+            source="platform.runtime",
+        )
+        logger.info(
+            "instance %s booted in %.1fs (background observer)", name, status.seconds
+        )
+        self._notify_boot_completed(name)
+
+    def _cancel_boot_watch(
+        self, name: str, *, join: bool = True, timeout_s: float = 5.0
+    ) -> None:
+        """Cancel (and by default join) the boot observer for *name*."""
+        with self._lock:
+            watch = self._boot_watchers.pop(name, None)
+        if watch is None:
+            return
+        watch.cancel.set()
+        thread = watch.thread
+        if not join or thread is None or thread is threading.current_thread():
+            return
+        thread.join(timeout=max(0.0, float(timeout_s)))
+        if thread.is_alive():  # pragma: no cover - only if adb itself hangs
+            logger.warning("boot observer for %s did not stop within %.1fs", name, timeout_s)
+
+    def _cancel_all_boot_watches(self, *, timeout_s: float = 5.0) -> None:
+        with self._lock:
+            watches = list(self._boot_watchers.values())
+            self._boot_watchers.clear()
+        for watch in watches:
+            watch.cancel.set()
+        for watch in watches:
+            thread = watch.thread
+            if thread is None or thread is threading.current_thread():
+                continue
+            thread.join(timeout=max(0.0, float(timeout_s)))
+            if thread.is_alive():  # pragma: no cover - only if adb itself hangs
+                logger.warning("a boot observer did not stop within %.1fs", timeout_s)
 
     def _persist_state(
         self,
@@ -852,6 +1042,9 @@ class RuntimeManagerService:
         expected: bool | None = None,
     ) -> AvdInfo | None:
         """Reconcile one process exit (called by stop() and the supervisor)."""
+        # The boot observer must not keep probing a process that is gone (or
+        # that the supervisor is about to restart).
+        self._cancel_boot_watch(name, join=False)
         with self._lock:
             record = self._records.pop(name, None)
             if record is None:
@@ -1250,6 +1443,10 @@ class RuntimeManagerService:
             },
             source="platform.runtime",
         )
+        # The caller (GUI startInstance, `avdfleet instances start`) returns
+        # before the guest boots; keep observing in the background so boot-time
+        # automation still fires once the device reports booted.
+        self._arm_boot_watch(record)
         return info
 
     def wait_boot(self, name: str, *, timeout_s: float | None = None) -> AvdInfo:
@@ -1667,6 +1864,9 @@ class RuntimeManagerService:
     ) -> AvdInfo:
         candidate = self._validate_name(name)
         base_info = self._require_instance(candidate)
+        # A stop is a decision, not a wait: cancel the boot observer before any
+        # signal is sent so it cannot fire the hook after this call returns.
+        self._cancel_boot_watch(candidate)
         timeout = (
             float(self.config.shutdown_timeout_s) if timeout_s is None else max(0.0, float(timeout_s))
         )
@@ -2060,7 +2260,13 @@ class RuntimeManagerService:
 
     # ------------------------------------------------------------------
     def close(self) -> None:
-        """Stop background supervision (emulator processes are left running)."""
+        """Stop background supervision and boot observation.
+
+        Emulator processes are left running (``stop`` owns that decision).
+        """
+        with self._lock:
+            self._closed = True
+        self._cancel_all_boot_watches()
         self._supervisor.stop(timeout_s=5.0)
 
     def __enter__(self) -> RuntimeManagerService:

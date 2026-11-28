@@ -159,6 +159,64 @@ class ScriptedAdb:
         return CommandResult(argv=argv, returncode=returncode, stdout=stdout)
 
 
+class SuDeniedAdb(ScriptedAdb):
+    """Scripted adb where shell ``su`` is denied but a direct rooted shell works.
+
+    :class:`ScriptedAdb` matches commands after unwrapping ``su -c "..."``, so it
+    cannot model the live-measured state where Magisk rejects the shell's ``su``
+    after a reboot while ``adb root`` still reaches magiskd. This variant keeps the
+    distinction: an ``su``-wrapped command gets its own answer, and direct shell
+    commands (what ``adb root`` exposes) are scripted separately.
+
+    ``sequences`` scripts one command's answers over time (the last answer repeats);
+    every command is recorded in ``trace``, with ``su:``-prefixed entries for the
+    wrapped path.
+    """
+
+    def __init__(
+        self,
+        responses: dict[str, tuple[int, str]],
+        *,
+        sequences: dict[str, list[tuple[int, str]]] | None = None,
+        default: tuple[int, str] = (1, ""),
+        su: tuple[int, str] = (1, "Permission denied\n"),
+    ) -> None:
+        super().__init__(responses, default=default)
+        self.sequences = {key: list(value) for key, value in (sequences or {}).items()}
+        self.su = su
+        self.trace: list[str] = []
+
+    def __call__(self, argv: list[str]) -> CommandResult:
+        via_su = argv[-1].startswith('su -c "')
+        command = self.inner(argv)
+        self.commands.append(command)
+        self.argvs.append(list(argv))
+        if via_su:
+            self.trace.append(f"su:{command}")
+            return CommandResult(argv=argv, returncode=self.su[0], stdout=self.su[1])
+        self.trace.append(command)
+        queue = self.sequences.get(command)
+        if queue:
+            reply = queue.pop(0) if len(queue) > 1 else queue[0]
+        else:
+            reply = self.responses.get(command, self.default)
+        return CommandResult(argv=argv, returncode=reply[0], stdout=reply[1])
+
+
+class TracingProber(DeviceProber):
+    """A prober that records ``forget_root`` calls into a shared command trace."""
+
+    def __init__(self, runner: Any, trace: list[str]) -> None:
+        super().__init__(runner=runner)
+        self.trace = trace
+        self.forget_calls: list[str] = []
+
+    def forget_root(self, serial: str) -> None:
+        self.trace.append("forget_root")
+        self.forget_calls.append(serial)
+        super().forget_root(serial)
+
+
 def _magisk_script(
     *,
     modules: dict[str, str] | None = None,
@@ -284,6 +342,7 @@ def _service_with_runner(
     downloads: ScriptedDownload,
     runner: ScriptedAdb,
     *,
+    prober: DeviceProber | None = None,
     events: Any | None = None,
     running: dict[str, bool] | None = None,
     settings: Any | None = None,
@@ -303,7 +362,7 @@ def _service_with_runner(
     return InstrumentationService(
         repository,
         library,
-        DeviceProber(runner=runner),
+        prober or DeviceProber(runner=runner),
         resolve,
         acquisition=AcquisitionStore(tmp_path / "toolchain", http_get=downloads),
         events=events,
@@ -1068,15 +1127,51 @@ def test_probe_userdebug_device_without_su_reports_adb_root_only() -> None:
     assert device.capabilities.zygisk_active is False
     assert device.capabilities.lsposed_installed is False
     assert device.magisk_modules == []
-    assert not any("magisk" in command for command in script.commands)
+    # C4 also asks magiskd through adbd root before settling on ``adb_root``; a
+    # plain userdebug image has no payload, so the answer must stay "not Magisk".
+    assert "magisk -V" in script.commands
 
     assert any("adb root" in note for note in device.capabilities.notes)
     assert any("not adb root" in blocker for blocker in device.blockers)
     assert device.compatible is True
 
-    # The probe really used `adb root` and then verified the rooted adbd.
-    assert "root" in script.commands
-    assert script.commands[script.commands.index("root") + 1] == "id"
+    # The probe really re-issued `adb root` and then verified the rooted adbd.
+    last_root = len(script.commands) - 1 - script.commands[::-1].index("root")
+    assert script.commands[last_root + 1] == "id"
+
+
+def test_probe_detects_magisk_through_adbd_root_when_shell_su_is_denied() -> None:
+    """C4: a denied ``su -c id`` must not hide a live Magisk install.
+
+    Live-measured after the Magisk app reboots the device: shell ``su`` is rejected
+    until the app grants it again, while ``magisk -V`` still answers through adbd
+    root. The probe must report Magisk root, not ``none``/``adb_root``.
+    """
+    script = SuDeniedAdb(
+        {
+            "getprop": (0, MAGISK_PROPS),
+            "root": (0, "restarting adbd as root\n"),
+            "id": (0, "uid=0(root) gid=0(root)\n"),
+            "magisk -V": (0, "26100\n"),
+            "pidof magiskd": (0, "4242\n"),
+            "ls /data/adb/magisk": (0, "magisk32\nmagisk64\n"),
+            "ls /data/adb/modules": (1, ""),
+            "magisk --sqlite \"select value from settings where key='zygisk'\"": (1, ""),
+            "mount": (0, "/dev/block/by-name/system /system ext4 ro 0 0\n"),
+        }
+    )
+
+    device = DeviceProber(runner=script).probe(instance="avd-04", serial="emulator-5558")
+
+    assert device.root_implementation is RootImplementation.MAGISK
+    assert device.capabilities.magisk is True
+    assert device.capabilities.magisk_version == "26100"
+    assert device.capabilities.magisk_environment_ready is True
+    # The payload answered only after adbd was restarted as root; the denied su
+    # attempt came first.
+    root_at = script.trace.index("root")
+    assert "su:magisk -V" in script.trace[:root_at]
+    assert "magisk -V" in script.trace[root_at:]
 
 
 def test_probe_userdebug_device_does_not_adb_root_without_opt_in() -> None:
@@ -1660,6 +1755,103 @@ def test_complete_magisk_setup_unsupported_when_magisk_is_not_running(
     assert not any("install" in argv for argv in script.argvs)
 
 
+class RebootSetupAdb(SuDeniedAdb):
+    """A Magisk device that disappears when the app reboots it, then returns booted.
+
+    ``/data/adb/magisk`` is only readable through a *fresh* adbd root: a root
+    cached before the reboot gets ``Permission denied``, which is the state the
+    step must avoid by dropping the cache when it sees the reboot.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            {
+                "getprop": (0, MAGISK_PROPS),
+                "root": (0, "restarting adbd as root\n"),
+                "id": (0, "uid=0(root) gid=0(root)\n"),
+                "magisk -V": (0, "26100\n"),
+                "pidof magiskd": (0, "4242\n"),
+                "ls /data/adb/magisk": (0, ""),
+                "ls /data/adb/modules": (1, ""),
+                "magisk --sqlite \"select value from settings where key='zygisk'\"": (1, ""),
+                "mount": (0, "/dev/block/by-name/system /system ext4 ro 0 0\n"),
+            },
+            sequences={
+                # The first observation is the normal booted device; then the app
+                # reboots it (adb is gone for two polls) and it comes back booted.
+                "getprop sys.boot_completed": [
+                    (0, "1\n"),
+                    (1, ""),
+                    (1, ""),
+                    (0, "1\n"),
+                ]
+            },
+        )
+        self.reboot_observed = False
+        self.fresh_root = False
+
+    def __call__(self, argv: list[str]) -> CommandResult:
+        result = super().__call__(argv)
+        if "install" in argv:
+            return CommandResult(argv=argv, returncode=0, stdout="Success\n")
+        via_su = argv[-1].startswith('su -c "')
+        command = self.inner(argv)
+        if via_su:
+            return result
+        if command == "getprop sys.boot_completed" and result.stdout.strip() != "1":
+            self.reboot_observed = True
+            self.trace.append("reboot-observed")
+        elif command == "getprop sys.boot_completed" and self.reboot_observed:
+            self.trace.append("device-back")
+        if command == "root" and self.reboot_observed:
+            self.fresh_root = True
+        if command == "ls /data/adb/magisk" and self.reboot_observed:
+            if self.fresh_root:
+                return CommandResult(argv=argv, returncode=0, stdout="magisk32\nmagisk64\n")
+            return CommandResult(
+                argv=argv, returncode=1, stdout="", stderr="Permission denied\n"
+            )
+        return result
+
+
+def test_complete_magisk_setup_forgets_the_root_cache_after_the_app_reboot(
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C2: the app-initiated reboot invalidates the cached adbd-root state.
+
+    The step waits for Magisk to reboot the device itself; if it keeps the cached
+    adbd-root flag, the post-reboot ``ls /data/adb/magisk`` runs as the shell user
+    and the step falsely concludes that setup did not complete.
+    """
+    clock = FakeClock()
+    monkeypatch.setattr("avdfleet.instrumentation.service.time", clock)
+    script = RebootSetupAdb()
+    prober = TracingProber(script, script.trace)
+    service = _service_with_runner(
+        repository, library, tmp_path, downloads, script, prober=prober
+    )
+    _acquire_fake_magisk(service, downloads, monkeypatch)
+    step = ProfileStep(id="magisk-setup", action=StepAction.COMPLETE_MAGISK_SETUP)
+
+    result = service._step_complete_magisk_setup(step, _target())
+
+    assert result.ok is True, result.message
+    assert result.state is ComponentState.ENABLED
+    assert "populated" in result.message
+    assert prober.forget_calls == ["emulator-5554"]
+    assert script.trace.index("reboot-observed") < script.trace.index("forget_root")
+    # The successful check ran only after a fresh ``adb root``; a stale cache
+    # would have answered Permission denied forever.
+    forget_at = script.trace.index("forget_root")
+    last_ls = len(script.trace) - 1 - script.trace[::-1].index("ls /data/adb/magisk")
+    assert "root" in script.trace[forget_at:last_ls]
+    assert script.fresh_root is True
+
+
 def test_install_lsposed_refuses_an_api_25_target(service: InstrumentationService) -> None:
     """LSPosed 1.9.2 aborts below API 27 (verified live), so the step fails early."""
     step = ProfileStep(id="lsposed-install", action=StepAction.INSTALL_LSPOSED)
@@ -2053,6 +2245,41 @@ def test_execute_run_survives_a_failing_event_bus(
     assert [result.instance for result in finished.results] == ["avd-01", "avd-stopped"]
     assert finished.results[0].ok is True
     assert finished.results[1].skipped is True
+
+
+def test_continue_on_error_where_every_step_failed_is_not_success(
+    repository: InstrumentationRepository,
+    library: ModuleLibrary,
+    tmp_path: Path,
+    downloads: ScriptedDownload,
+) -> None:
+    """C1: ``continue_on_error`` must not turn an all-failed run into success.
+
+    Two ``verify_root`` steps hit a device with no root and both fail. The target
+    result must be ``ok=False`` and the run must end ``failed`` — never
+    ``succeeded``.
+    """
+    script = _userdebug_script(adb_root=False)
+    service = _service_with_runner(repository, library, tmp_path, downloads, script)
+    profile = service.save_profile(
+        profile_id=None,
+        name="Every step fails",
+        steps=[
+            {"action": "verify_root", "params": {"continue_on_error": True}},
+            {"action": "verify_root", "params": {"continue_on_error": True}},
+        ],
+    )
+    run = service.start_run(profile_id=profile.id, targets=["avd-01"])
+
+    finished = service.execute_run(run.id)
+
+    assert len(finished.results) == 1
+    target_result = finished.results[0]
+    assert [step.ok for step in target_result.steps] == [False, False]
+    assert target_result.ok is False
+    assert target_result.error
+    assert finished.state is RunState.FAILED
+
 
 def test_dialog_target_prefers_the_confirm_button_over_the_message() -> None:
     """Regression: Magisk's body text contains "proceed", which used to be tapped.

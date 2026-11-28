@@ -736,6 +736,7 @@ class InstrumentationService:
         self._prober.shell(
             target.serial, "am start -n com.topjohnwu.magisk/.ui.MainActivity"
         )
+        rebooted = False
         tapped = 0
         dialog_deadline = time.monotonic() + 150
         while time.monotonic() < dialog_deadline:
@@ -758,6 +759,10 @@ class InstrumentationService:
                 break
             boot = self._prober.shell(target.serial, "getprop sys.boot_completed")
             if not (boot.ok and boot.text().strip() == "1"):
+                # The app is rebooting the device. A guest reboot drops adbd's root
+                # state, so the cached root must not survive it.
+                self._prober.forget_root(target.serial)
+                rebooted = True
                 break  # the app is rebooting the device; wait for it below
 
         # The app reboots the device itself once setup succeeds.
@@ -766,6 +771,9 @@ class InstrumentationService:
             time.sleep(5)
             boot = self._prober.shell(target.serial, "getprop sys.boot_completed")
             if not (boot.ok and boot.text().strip() == "1"):
+                if not rebooted:
+                    self._prober.forget_root(target.serial)
+                    rebooted = True
                 continue
             ready = self._prober.root_shell(target.serial, "ls /data/adb/magisk", magisk=True)
             if ready.ok and ready.text():
