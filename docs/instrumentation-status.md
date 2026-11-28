@@ -206,10 +206,12 @@ Found while proving guest isolation. Two are fixed; one remains open.
    port in its state file; two workers were observed on 59958 and 59967, and the
    pre-fix code fails the new two-process test. In-process/daemon behaviour is
    unchanged.
-2. **OPEN — MEDIUM — bridge token is plaintext in `<data>/bridge/<instance>-<hash>.json`.**
-   Any process running as the same user can read it and use that listener. Guest
-   isolation is unaffected. Suggested fix: rely on the `0600` file mode already
-   available to the state file, or store a hash of the token and compare hashes.
+2. **CLOSED AS DOCUMENTATION — MEDIUM — bridge token is in the owner-only state file.**
+   The file is written `0600` and the token is deliberately local-only defence in
+   depth: the parent process needs it to configure the emulator's `http_proxy`, so it
+   cannot be hashed. Guest isolation is unaffected. The over-claim in
+   `docs/security.md` ("or local process cannot reuse that listener") was corrected
+   to say exactly what is enforced.
 3. **FIXED — HIGH — `POST /instances/{name}/stop` reported `stopped` while the qemu
    PIDs were still alive.** Seen once under a separate daemon with a temp data dir;
    Reproduced deterministically: the stop path marked the record stopped without

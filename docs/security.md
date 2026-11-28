@@ -64,7 +64,12 @@ machine.
   passphrase.
 - Each bridged AVD has a random per-instance loopback proxy password, passed to the
   emulator through its `http_proxy` environment (not `argv`, so it does not appear in
-  `ps`/command-line logs). Another AVD or local process cannot reuse that listener.
+  `ps`/command-line logs). Another AVD cannot reuse that listener: the bridge checks both
+the instance identity and that token, so a guest with no credential, or with a
+different instance's credential, gets `407`. The token is local defence-in-depth,
+not a boundary against a process already running as the same user: it is stored in
+the owner-only (`0600`) bridge state file because the parent needs it to configure
+the emulator. A same-user process that can read that file can reuse the listener.
 - `ADB_LOCAL_TRANSPORT_MAX_PORT` is raised so adb accepts all 64 emulator ports. adb
   reads it only when its server starts; `avdfleet doctor --slow` fails if an existing
   adb server was started with the default 16-emulator limit and gives the safe restart
